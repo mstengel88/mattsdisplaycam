@@ -383,6 +383,8 @@ grid_quit() {
 		player_quit "$i"
 	done
 	pkill -f 'displaycameras-' >/dev/null 2>&1
+	killall mpv >/dev/null 2>&1
+	killall ffmpeg >/dev/null 2>&1
 }
 
 start_mpv_grid() {
@@ -390,6 +392,7 @@ start_mpv_grid() {
 		echo "mpv_grid requires at least four configured cameras."
 		return 1
 	fi
+	grid_quit
 	[ -d "$MPV_RUNDIR" ] || mkdir -p "$MPV_RUNDIR"
 	[ -d "$MPV_LOGDIR" ] || mkdir -p "$MPV_LOGDIR"
 	mpv_display_env || return 1
@@ -637,6 +640,17 @@ $0 start
 repair)
 # Do nothing unless the service PID file exists
 if [ ! -f $PIDFILE ]; then exit 0; fi
+if [ "$player_backend" = "mpv" ] && [ "$mpv_grid" = "true" ]; then
+	if [ "`grid_getplaystatus`" != "Playing" ]; then
+		echo "Restarting mpv 2x2 grid"
+		rm -f $PIDFILE
+		grid_quit
+		start_mpv_grid
+		sleep $startsleep
+		touch $PIDFILE
+	fi
+	exit 0
+fi
 # Stop and start the service if we have too many omxplayers
 if [ "$player_backend" = "omxplayer" ] && [ `pgrep -c omxplayer.bin` -gt $cameras ]
 then
