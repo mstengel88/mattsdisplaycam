@@ -408,8 +408,13 @@ fi
 # Start displaying camera feeds
 start)
 if [ -f $PIDFILE ]; then
-	echo "PID file exists!  Stop or Restart this service instead."
-exit 1
+	echo "PID file exists; clearing stale displaycameras state before start."
+	rm -f $PIDFILE
+	for i in "${camera_names[@]}"
+	do
+		player_quit "$i"
+	done
+	sleep 1
 fi
 if [ "$blank" = "true" ]; then
 	echo "Blanking screen"

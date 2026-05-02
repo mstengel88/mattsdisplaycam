@@ -58,6 +58,7 @@ write_four_camera_layout() {
 			feed="${feed#\"}"
 			feed="${feed%\'}"
 			feed="${feed#\'}"
+			feed="`printf '%s\n' "$feed" | sed 's/\\\\\([?&=:/@]\)/\1/g'`"
 			parsed_feeds+=("$feed")
 			;;
 		esac
