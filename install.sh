@@ -157,6 +157,10 @@ else
 	echo "Verify package contents."
 	exit 2
 fi
+if [ -r $DIR/displaycameras-boot.timer ]; then
+	echo "Copying the boot timer and setting permissions."
+	cp -f $DIR/displaycameras-boot.timer /etc/systemd/system/ && chown root:root /etc/systemd/system/displaycameras-boot.timer && chmod 0644 /etc/systemd/system/displaycameras-boot.timer
+fi
 # Config files, cron job, gpu memory split, and disable overscan support only if not upgrading
 if [ "$1" != "upgrade" ]; then
 	if [ -r $DIR/displaycameras.conf ]; then
@@ -282,6 +286,7 @@ fi
 # Update systemd and enable the displaycameras service.
 systemctl daemon-reload
 systemctl reenable displaycameras
+systemctl enable displaycameras-boot.timer
 
 echo "Installation Successful!"
 read -p "See the README.md? [Y/y/N/n]"

@@ -1,0 +1,9 @@
+[Unit]
+Description=Start displaycameras after the desktop has settled
+
+[Timer]
+OnBootSec=90
+Unit=displaycameras.service
+
+[Install]
+WantedBy=timers.target

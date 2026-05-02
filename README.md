@@ -41,6 +41,8 @@ That keeps your existing global config, backs up `/etc/displaycameras/layout.con
 
 `sudo systemctl daemon-reload && sudo systemctl restart displaycameras`
 
+The installer also enables `displaycameras-boot.timer`, which starts the camera display 90 seconds after boot as a fallback for desktops that create the graphical session slowly. The Pi still needs to boot to the desktop and automatically log in as `display_user` so `mpv` has a real display to use.
+
 ### Optional Remote Access
 Install the optional remote access service with:
 
