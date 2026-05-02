@@ -37,22 +37,43 @@ write_four_camera_layout() {
 		echo "No installed layout was found at $layout."
 		return 1
 	fi
-	. "$layout"
 	backup="$layout.bak.`date +%Y%m%d%H%M%S`"
 	cp -f "$layout" "$backup"
 	echo "Backed up the existing layout to $backup"
+	name_line="`sed -n 's/^camera_names=(\(.*\)).*/\1/p' "$layout" | head -1`"
+	parsed_names=()
+	if [ "$name_line" != "" ]; then
+		read -r -a parsed_names <<< "$name_line"
+	fi
+	parsed_feeds=()
+	while IFS= read -r line
+	do
+		case "$line" in
+		*rtsp://*|*rtsps://*)
+			feed="${line%%#*}"
+			feed="${feed%\\}"
+			feed="${feed#"${feed%%[![:space:]]*}"}"
+			feed="${feed%"${feed##*[![:space:]]}"}"
+			feed="${feed%\"}"
+			feed="${feed#\"}"
+			feed="${feed%\'}"
+			feed="${feed#\'}"
+			parsed_feeds+=("$feed")
+			;;
+		esac
+	done < "$layout"
 	selected_names=()
 	selected_feeds=()
-	for i in "${!camera_feeds[@]}"
+	for i in "${!parsed_feeds[@]}"
 	do
-		case "${camera_feeds[$i]}" in
+		case "${parsed_feeds[$i]}" in
 		""|"<Camera stream URL>"|rtsp://user:password@camera-*.example/stream)
-			echo "Skipping placeholder feed for ${camera_names[$i]:-Camera$((i+1))}"
+			echo "Skipping placeholder feed for ${parsed_names[$i]:-Camera$((i+1))}"
 			continue
 			;;
 		esac
-		selected_names+=("${camera_names[$i]:-Camera$((i+1))}")
-		selected_feeds+=("${camera_feeds[$i]}")
+		selected_names+=("${parsed_names[$i]:-Camera$((i+1))}")
+		selected_feeds+=("${parsed_feeds[$i]}")
 		if [ "${#selected_feeds[@]}" -eq 4 ]; then
 			break
 		fi
@@ -88,7 +109,7 @@ write_four_camera_layout() {
 		echo "camera_feeds=( \\"
 		for i in 0 1 2 3
 		do
-			printf '%q \\\n' "${camera_feeds[$i]}"
+			printf '"%s" \\\n' "${camera_feeds[$i]}"
 		done
 		echo ")"
 		echo
