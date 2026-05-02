@@ -58,6 +58,10 @@ mpv)
 		echo "Please install socat for mpv status and repair support."
 		exit 1
 	fi
+	if [[ $EUID -eq 0 ]] && ! command -v runuser >/dev/null 2>&1; then
+		echo "Please install util-linux so mpv can run in the desktop user's session."
+		exit 1
+	fi
 	;;
 *)
 	echo "Unsupported player_backend '$player_backend'. Use auto, omxplayer, or mpv."
@@ -107,6 +111,9 @@ fi
 if [ "$omx_timeout" = "" ]; then
 	omx_timeout=30
 fi
+if [ "$display_wait" = "" ]; then
+	display_wait=90
+fi
 
 # Set a variables for PID file and Display Sequence file
 PIDFILE=/var/run/displaycameras.pid
@@ -116,6 +123,27 @@ MPV_LOGDIR=/var/log/displaycameras
 
 # How many cameras do we have?
 cameras="${#camera_names[@]}"
+if [ "$cameras" -eq 0 ]; then
+	echo "No cameras are configured in /etc/displaycameras/layout.conf.default."
+	exit 1
+fi
+if [ "$cameras" -ne "${#camera_feeds[@]}" ]; then
+	echo "camera_names and camera_feeds must contain the same number of entries."
+	exit 1
+fi
+if [ "$cameras" -gt "${#window_positions[@]}" ]; then
+	echo "There must be at least as many window_positions as camera_names."
+	exit 1
+fi
+for i in ${!camera_feeds[*]}
+do
+	case "${camera_feeds[$i]}" in
+	""|"<Camera stream URL>"|rtsp://user:password@camera-*.example/stream)
+		echo "Camera feed for ${camera_names[$i]} still uses a placeholder URL."
+		exit 1
+		;;
+	esac
+done
 # Set the max camera rotation sequence as one less than the number of cameras
 # (since it starts at zero).
 max_seq=$((cameras-1))
@@ -177,7 +205,30 @@ mpv_display_env() {
 	if [ "$XAUTHORITY" = "" ] && [ -r "/home/$display_user/.Xauthority" ]; then
 		XAUTHORITY=/home/$display_user/.Xauthority
 	fi
-	return 0
+	waited=0
+	while [ "$waited" -lt "$display_wait" ]
+	do
+		if [ -n "$WAYLAND_DISPLAY" ] && [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+			return 0
+		fi
+		display_number="${DISPLAY#:}"
+		display_number="${display_number%%.*}"
+		if [ -S "/tmp/.X11-unix/X$display_number" ]; then
+			return 0
+		fi
+		sleep 1
+		waited=$((waited+1))
+	done
+	echo "No graphical display was ready for $display_user after ${display_wait}s."
+	return 1
+}
+
+mpv_command() {
+	exec mpv --no-terminal --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-$1" --geometry="$2" --profile=low-latency --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$3" "$4"
+}
+
+mpv_command_as_display_user() {
+	exec runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XAUTHORITY="$XAUTHORITY" mpv --no-terminal --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-$1" --geometry="$2" --profile=low-latency --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$3" "$4"
 }
 
 mpv_ipc() {
@@ -199,8 +250,11 @@ player_getplaystatus() {
 		;;
 	mpv)
 		pidfile="`mpv_pidfile "$1"`"
-		if [ -r "$pidfile" ] && kill -0 "`cat "$pidfile"`" 2>/dev/null; then
+		socket="`mpv_socket "$1"`"
+		if [ -r "$pidfile" ] && kill -0 "`cat "$pidfile"`" 2>/dev/null && [ -S "$socket" ]; then
 			echo "Playing"
+		elif [ -r "$pidfile" ] && kill -0 "`cat "$pidfile"`" 2>/dev/null; then
+			echo "Starting"
 		else
 			echo "Stopped"
 		fi
@@ -217,7 +271,11 @@ player_getposition() {
 		position="`mpv_get_property "$1" playback-time`"
 		position="${position%.*}"
 		if [ "$position" = "" ] || [ "$position" = "null" ]; then
-			position=0
+			if [ "`player_getplaystatus "$1"`" = "Playing" ]; then
+				position=1
+			else
+				position=0
+			fi
 		fi
 		echo "${position}s"
 		;;
@@ -279,9 +337,9 @@ start_player() {
 		echo "Starting ${camera_names[$i]} at `date`" > "$logfile"
 		echo "DISPLAY=$DISPLAY XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAND_DISPLAY XAUTHORITY=$XAUTHORITY" >> "$logfile"
 		if [ "$EUID" -eq 0 ]; then
-			runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XAUTHORITY="$XAUTHORITY" mpv --no-terminal --force-window=yes --title="displaycameras-${camera_names[$i]}" --geometry="$geometry" --profile=low-latency --rtsp-transport=tcp --input-ipc-server="$socket" "${camera_feeds[$i]}" >> "$logfile" 2>&1 &
+			mpv_command_as_display_user "${camera_names[$i]}" "$geometry" "$socket" "${camera_feeds[$i]}" >> "$logfile" 2>&1 &
 		else
-			mpv --no-terminal --force-window=yes --title="displaycameras-${camera_names[$i]}" --geometry="$geometry" --profile=low-latency --rtsp-transport=tcp --input-ipc-server="$socket" "${camera_feeds[$i]}" >> "$logfile" 2>&1 &
+			mpv_command "${camera_names[$i]}" "$geometry" "$socket" "${camera_feeds[$i]}" >> "$logfile" 2>&1 &
 		fi
 		echo $! > "$pidfile"
 		;;

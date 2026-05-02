@@ -33,6 +33,14 @@ Download https://github.com/Anonymousdog/displaycameras/archive/master.tar.gz
 
 On Trixie, the installer installs `mpv`, `socat`, and `fbi`. On older releases where `omxplayer` is still available, the installer keeps the original `omxplayer` behavior.
 
+For a reboot-safe four-camera screen, run:
+
+`sudo ./install.sh upgrade --four-camera-layout`
+
+That keeps your existing global config, backs up `/etc/displaycameras/layout.conf.default`, and rewrites the installed layout as a 2x2 grid using the first four camera names and RTSP URLs from the old layout. After that:
+
+`sudo systemctl daemon-reload && sudo systemctl restart displaycameras`
+
 ### Optional Remote Access
 Install the optional remote access service with:
 
@@ -77,6 +85,8 @@ All of these variables may be added to one or more layout configuration files to
 `player_backend` defaults to `auto`. Use `mpv` on Trixie. Use `omxplayer` only on older Raspberry Pi OS releases where omxplayer is installed.
 
 `display_user` is the desktop user used by the `mpv` backend. The installer sets this to the user that ran `sudo ./install.sh`, normally `pi`. If `mpv` feeds fail to start on Trixie, check `/var/log/displaycameras/<camera-name>.mpv.log` for the exact player error.
+
+The default layout is a four-camera 2x2 grid for a 1920x1080 display. On upgrades, existing layout files are preserved unless you pass `--four-camera-layout`.
 
 ### Camera and Window Layout
 * Screen/window matrix setup, window names, camera names, and camera feeds should be here (and most definitely NOT in the main config file).
