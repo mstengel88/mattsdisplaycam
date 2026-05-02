@@ -112,6 +112,7 @@ fi
 PIDFILE=/var/run/displaycameras.pid
 DISPLAY_SEQUENCE_FILE=/tmp/displaycameras.seq
 MPV_RUNDIR=/var/run/displaycameras
+MPV_LOGDIR=/var/log/displaycameras
 
 # How many cameras do we have?
 cameras="${#camera_names[@]}"
@@ -145,6 +146,38 @@ mpv_socket() {
 
 mpv_pidfile() {
 	echo "$MPV_RUNDIR/$1.pid"
+}
+
+mpv_logfile() {
+	echo "$MPV_LOGDIR/$1.mpv.log"
+}
+
+mpv_display_env() {
+	if [ "$display_user" = "" ]; then
+		display_user=pi
+	fi
+	display_uid="`id -u "$display_user" 2>/dev/null`"
+	if [ "$display_uid" = "" ]; then
+		echo "Configured display_user '$display_user' does not exist."
+		return 1
+	fi
+	if [ "$DISPLAY" = "" ]; then
+		DISPLAY=:0
+	fi
+	if [ "$XDG_RUNTIME_DIR" = "" ] || [ "$XDG_RUNTIME_DIR" = "/run/user/1000" ]; then
+		XDG_RUNTIME_DIR=/run/user/$display_uid
+	fi
+	if [ "$WAYLAND_DISPLAY" = "" ]; then
+		if [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
+			WAYLAND_DISPLAY=wayland-1
+		elif [ -S "$XDG_RUNTIME_DIR/wayland-0" ]; then
+			WAYLAND_DISPLAY=wayland-0
+		fi
+	fi
+	if [ "$XAUTHORITY" = "" ] && [ -r "/home/$display_user/.Xauthority" ]; then
+		XAUTHORITY=/home/$display_user/.Xauthority
+	fi
+	return 0
 }
 
 mpv_ipc() {
@@ -233,11 +266,23 @@ start_player() {
 		;;
 	mpv)
 		[ -d "$MPV_RUNDIR" ] || mkdir -p "$MPV_RUNDIR"
+		[ -d "$MPV_LOGDIR" ] || mkdir -p "$MPV_LOGDIR"
+		mpv_display_env || return 1
+		if [ "$EUID" -eq 0 ]; then
+			chown "$display_user" "$MPV_RUNDIR"
+		fi
 		socket="`mpv_socket "${camera_names[$i]}"`"
 		pidfile="`mpv_pidfile "${camera_names[$i]}"`"
+		logfile="`mpv_logfile "${camera_names[$i]}"`"
 		rm -f "$socket" "$pidfile"
 		geometry="`geometry_to_mpv "${window_positions[$x]}"`"
-		mpv --no-terminal --force-window=yes --title="displaycameras-${camera_names[$i]}" --geometry="$geometry" --profile=low-latency --rtsp-transport=tcp --input-ipc-server="$socket" "${camera_feeds[$i]}" >/dev/null 2>&1 &
+		echo "Starting ${camera_names[$i]} at `date`" > "$logfile"
+		echo "DISPLAY=$DISPLAY XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAND_DISPLAY XAUTHORITY=$XAUTHORITY" >> "$logfile"
+		if [ "$EUID" -eq 0 ]; then
+			runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XAUTHORITY="$XAUTHORITY" mpv --no-terminal --force-window=yes --title="displaycameras-${camera_names[$i]}" --geometry="$geometry" --profile=low-latency --rtsp-transport=tcp --input-ipc-server="$socket" "${camera_feeds[$i]}" >> "$logfile" 2>&1 &
+		else
+			mpv --no-terminal --force-window=yes --title="displaycameras-${camera_names[$i]}" --geometry="$geometry" --profile=low-latency --rtsp-transport=tcp --input-ipc-server="$socket" "${camera_feeds[$i]}" >> "$logfile" 2>&1 &
+		fi
 		echo $! > "$pidfile"
 		;;
 	esac

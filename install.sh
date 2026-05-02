@@ -16,6 +16,10 @@ if [ -r /etc/os-release ]; then
 fi
 
 remote_access=false
+display_user="${SUDO_USER:-pi}"
+if [ "$display_user" = "root" ]; then
+	display_user=pi
+fi
 for arg in "$@"
 do
 	if [ "$arg" = "--remote-access" ]; then
@@ -75,6 +79,7 @@ if [ "$1" != "upgrade" ]; then
 		cp -f $DIR/layout.conf.default /etc/displaycameras/ && chown root:root /etc/displaycameras/layout.conf.default && chmod 0644 /etc/displaycameras/layout.conf.default
 		cp -f $DIR/displaycameras.conf /etc/displaycameras/ && chown root:root /etc/displaycameras/displaycameras.conf && chmod 0644 /etc/displaycameras/displaycameras.conf
 		sed -i "s/^#player_backend=.*/player_backend=$player_backend/" /etc/displaycameras/displaycameras.conf
+		sed -i "s/^#display_user=.*/display_user=$display_user/" /etc/displaycameras/displaycameras.conf
 	else
 		echo "The displaycameras.conf file is missing or unreadable. This is a critical file."
 		echo "Verify package contents."
@@ -127,6 +132,14 @@ if [ "$1" != "upgrade" ]; then
 		fi
 	else
 		echo "Skipping legacy gpu_mem and overscan changes for the $player_backend backend."
+	fi
+fi
+if [ -r /etc/displaycameras/displaycameras.conf ]; then
+	if ! grep -q '^player_backend=' /etc/displaycameras/displaycameras.conf; then
+		echo "player_backend=$player_backend" >> /etc/displaycameras/displaycameras.conf
+	fi
+	if ! grep -q '^display_user=' /etc/displaycameras/displaycameras.conf; then
+		echo "display_user=$display_user" >> /etc/displaycameras/displaycameras.conf
 	fi
 fi
 if [ -r $DIR/omxplayer_dbuscontrol ]; then

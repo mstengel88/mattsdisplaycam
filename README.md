@@ -76,6 +76,8 @@ All of these variables may be added to one or more layout configuration files to
 
 `player_backend` defaults to `auto`. Use `mpv` on Trixie. Use `omxplayer` only on older Raspberry Pi OS releases where omxplayer is installed.
 
+`display_user` is the desktop user used by the `mpv` backend. The installer sets this to the user that ran `sudo ./install.sh`, normally `pi`. If `mpv` feeds fail to start on Trixie, check `/var/log/displaycameras/<camera-name>.mpv.log` for the exact player error.
+
 ### Camera and Window Layout
 * Screen/window matrix setup, window names, camera names, and camera feeds should be here (and most definitely NOT in the main config file).
 
