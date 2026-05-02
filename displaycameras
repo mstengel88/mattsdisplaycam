@@ -54,6 +54,10 @@ mpv)
 		echo "Please install mpv or set player_backend=omxplayer."
 		exit 1
 	fi
+	if ! command -v ffmpeg >/dev/null 2>&1; then
+		echo "Please install ffmpeg for fullscreen 2x2 grid support."
+		exit 1
+	fi
 	if ! command -v socat >/dev/null 2>&1; then
 		echo "Please install socat for mpv status and repair support."
 		exit 1
@@ -121,6 +125,8 @@ DISPLAY_SEQUENCE_FILE=/tmp/displaycameras.seq
 MPV_RUNDIR=/var/run/displaycameras
 MPV_LOGDIR=/var/log/displaycameras
 MPV_GRID_NAME=grid
+GRID_WIDTH=1920
+GRID_HEIGHT=1080
 
 # How many cameras do we have?
 cameras="${#camera_names[@]}"
@@ -252,15 +258,17 @@ mpv_command_as_display_user() {
 }
 
 mpv_grid_filter() {
-	echo '[vid1]scale=960:540:force_original_aspect_ratio=decrease,pad=960:540:(ow-iw)/2:(oh-ih)/2[v1];[vid2]scale=960:540:force_original_aspect_ratio=decrease,pad=960:540:(ow-iw)/2:(oh-ih)/2[v2];[vid3]scale=960:540:force_original_aspect_ratio=decrease,pad=960:540:(ow-iw)/2:(oh-ih)/2[v3];[vid4]scale=960:540:force_original_aspect_ratio=decrease,pad=960:540:(ow-iw)/2:(oh-ih)/2[v4];[v1][v2]hstack[top];[v3][v4]hstack[bottom];[top][bottom]vstack[vo]'
+	tile_width=$((GRID_WIDTH / 2))
+	tile_height=$((GRID_HEIGHT / 2))
+	echo "[0:v]scale=${tile_width}:${tile_height}:force_original_aspect_ratio=decrease,pad=${tile_width}:${tile_height}:(ow-iw)/2:(oh-ih)/2[v0];[1:v]scale=${tile_width}:${tile_height}:force_original_aspect_ratio=decrease,pad=${tile_width}:${tile_height}:(ow-iw)/2:(oh-ih)/2[v1];[2:v]scale=${tile_width}:${tile_height}:force_original_aspect_ratio=decrease,pad=${tile_width}:${tile_height}:(ow-iw)/2:(oh-ih)/2[v2];[3:v]scale=${tile_width}:${tile_height}:force_original_aspect_ratio=decrease,pad=${tile_width}:${tile_height}:(ow-iw)/2:(oh-ih)/2[v3];[v0][v1][v2][v3]xstack=inputs=4:layout=0_0|${tile_width}_0|0_${tile_height}|${tile_width}_${tile_height}[v]"
 }
 
 mpv_grid_command() {
-	exec mpv --no-terminal --fs --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-grid" --profile=low-latency --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$1" --lavfi-complex="$2" "$3" "$4" "$5" "$6"
+	ffmpeg -hide_banner -loglevel warning -nostdin -rtsp_transport tcp -i "$3" -rtsp_transport tcp -i "$4" -rtsp_transport tcp -i "$5" -rtsp_transport tcp -i "$6" -filter_complex "$2" -map "[v]" -an -c:v rawvideo -pix_fmt yuv420p -f nut - | exec mpv --no-terminal --fs --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-grid" --profile=low-latency --untimed --no-cache --input-ipc-server="$1" -
 }
 
 mpv_grid_command_as_display_user() {
-	exec runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XAUTHORITY="$XAUTHORITY" mpv --no-terminal --fs --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-grid" --profile=low-latency --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$1" --lavfi-complex="$2" "$3" "$4" "$5" "$6"
+	exec runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XAUTHORITY="$XAUTHORITY" bash -c 'ffmpeg -hide_banner -loglevel warning -nostdin -rtsp_transport tcp -i "$3" -rtsp_transport tcp -i "$4" -rtsp_transport tcp -i "$5" -rtsp_transport tcp -i "$6" -filter_complex "$2" -map "[v]" -an -c:v rawvideo -pix_fmt yuv420p -f nut - | exec mpv --no-terminal --fs --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-grid" --profile=low-latency --untimed --no-cache --input-ipc-server="$1" -' _ "$1" "$2" "$3" "$4" "$5" "$6"
 }
 
 mpv_ipc() {
@@ -368,6 +376,13 @@ grid_quit() {
 		kill "`cat "$pidfile"`" 2>/dev/null
 		rm -f "$pidfile" "$socket"
 	fi
+	pkill -f 'title=displaycameras-grid' >/dev/null 2>&1
+	pkill -f 'displaycameras-grid' >/dev/null 2>&1
+	for i in "${camera_names[@]}"
+	do
+		player_quit "$i"
+	done
+	pkill -f 'displaycameras-' >/dev/null 2>&1
 }
 
 start_mpv_grid() {

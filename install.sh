@@ -121,7 +121,7 @@ write_four_camera_layout() {
 }
 
 if [ "$VERSION_CODENAME" = "trixie" ] || ! apt-cache show omxplayer >/dev/null 2>&1; then
-	packages="mpv socat fbi util-linux"
+	packages="mpv ffmpeg socat fbi util-linux"
 	player_backend="mpv"
 else
 	packages="omxplayer fbi"
