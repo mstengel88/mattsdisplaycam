@@ -234,8 +234,12 @@ if [ -r /etc/displaycameras/displaycameras.conf ]; then
 	if ! grep -q '^display_user=' /etc/displaycameras/displaycameras.conf; then
 		echo "display_user=$display_user" >> /etc/displaycameras/displaycameras.conf
 	fi
-	if [ "$player_backend" = "mpv" ] && ! grep -q '^mpv_grid=' /etc/displaycameras/displaycameras.conf; then
-		echo "mpv_grid=true" >> /etc/displaycameras/displaycameras.conf
+	if [ "$player_backend" = "mpv" ]; then
+		if grep -q '^mpv_grid=' /etc/displaycameras/displaycameras.conf; then
+			sed -i 's/^mpv_grid=.*/mpv_grid=true/' /etc/displaycameras/displaycameras.conf
+		else
+			echo "mpv_grid=true" >> /etc/displaycameras/displaycameras.conf
+		fi
 	fi
 fi
 if [ "$four_camera_layout" = "true" ]; then

@@ -11,7 +11,8 @@ Wants=graphical.target
 
 [Service]
 Type=oneshot
-Restart=no
+Restart=on-failure
+RestartSec=10
 TimeoutSec=5min
 IgnoreSIGPIPE=no
 KillMode=control-group

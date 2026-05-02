@@ -124,6 +124,9 @@ MPV_GRID_NAME=grid
 
 # How many cameras do we have?
 cameras="${#camera_names[@]}"
+if [ "$player_backend" = "mpv" ] && [ "$cameras" -eq 4 ] && [ "$mpv_grid" = "" ]; then
+	mpv_grid=true
+fi
 validation_failed=false
 if [ "$cameras" -eq 0 ]; then
 	echo "No cameras are configured in /etc/displaycameras/layout.conf.default."
