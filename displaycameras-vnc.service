@@ -1,0 +1,14 @@
+[Unit]
+Description=Remote access for displaycameras
+After=graphical.target
+Wants=graphical.target
+
+[Service]
+Type=simple
+Environment=DISPLAY=:0
+ExecStart=/usr/bin/x11vnc -display :0 -forever -shared -rfbport 5900 -localhost
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical.target

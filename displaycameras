@@ -1,0 +1,516 @@
+#!/bin/bash
+### BEGIN INIT INFO
+# Provides: omxplayer
+# Required-Start: $network $local_fs dbus cron
+# Required-Stop:
+# Default-Start: 2 3 4 5
+# Default-Stop: 0 1 6
+# Short-Description: Displays camera feeds for monitoring
+# Description:
+### END INIT INFO
+
+#version:0.9.0
+
+# Exit if not root
+if [[ $EUID -ne 0 ]]; then
+   echo "This script must be run as root"
+   exit 0
+fi
+
+# Exit if config file is not present and readable
+if [ -r /etc/displaycameras/displaycameras.conf ]; then
+	. /etc/displaycameras/displaycameras.conf;
+else
+	echo "/etc/displaycameras/displaycameras.conf does not exist or is not readable."
+	exit 1
+fi
+
+# Trixie no longer ships omxplayer.  Prefer the configured backend, or choose
+# omxplayer on legacy installs and mpv everywhere else.
+if [ "$player_backend" = "" ] || [ "$player_backend" = "auto" ]; then
+	if command -v omxplayer >/dev/null 2>&1 && command -v omxplayer_dbuscontrol >/dev/null 2>&1; then
+		player_backend="omxplayer"
+	elif command -v mpv >/dev/null 2>&1; then
+		player_backend="mpv"
+	else
+		echo "Please install omxplayer or mpv."
+		exit 1
+	fi
+fi
+
+case "$player_backend" in
+omxplayer)
+	if ! command -v omxplayer_dbuscontrol >/dev/null 2>&1; then
+		echo "omxplayer_dbuscontrol must be executable and in the PATH env variable."
+		exit 1
+	fi
+	if ! command -v omxplayer >/dev/null 2>&1; then
+		echo "Please install omxplayer or set player_backend=mpv."
+		exit 1
+	fi
+	;;
+mpv)
+	if ! command -v mpv >/dev/null 2>&1; then
+		echo "Please install mpv or set player_backend=omxplayer."
+		exit 1
+	fi
+	if ! command -v socat >/dev/null 2>&1; then
+		echo "Please install socat for mpv status and repair support."
+		exit 1
+	fi
+	;;
+*)
+	echo "Unsupported player_backend '$player_backend'. Use auto, omxplayer, or mpv."
+	exit 1
+	;;
+esac
+
+# Exit if default layout config file is not present and readable
+if [ ! -r /etc/displaycameras/layout.conf.default ]; then
+	echo "/etc/displaycameras/layout.conf.default does not exist or is not readable."
+	exit 1
+fi
+
+# If enabled, autodetect display mode, check for layout config file for that
+# mode, and load that file if present.
+if [ "$displaydetect" = "true" ]; then
+	boot_config=/boot/config.txt
+	if [ ! -r "$boot_config" ] && [ -r /boot/firmware/config.txt ]; then
+		boot_config=/boot/firmware/config.txt
+	fi
+	if [ "$player_backend" = "mpv" ] || { [ -r "$boot_config" ] && [ "`grep disable_overscan "$boot_config" | egrep -v ^#`" = "disable_overscan=1" ]; }; then
+		if command -v xrandr >/dev/null 2>&1; then
+			mode="`xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}'`"
+		else
+			mode="`fbset -s | egrep ^mode | awk -v N=2 '{print $2}'`"
+			# remove quotes surrounding $mode
+			mode=${mode%\"}
+			mode=${mode#\"}
+		fi
+		if [ -r /etc/displaycameras/layout.conf.$mode ]; then
+			. /etc/displaycameras/layout.conf.$mode
+			displaydetectactive=true
+		else
+			. /etc/displaycameras/layout.conf.default
+			echo "No layout configuration file found for $mode resolution."
+		fi
+	else
+		. /etc/displaycameras/layout.conf.default
+		echo "Display resolution autodetection will not work properly with overscan enabled."
+		echo "Ensure disable_overscan=1 is in $boot_config."
+	fi
+else
+	. /etc/displaycameras/layout.conf.default
+fi
+
+# Ensure there is an omxplayer timeout value
+if [ "$omx_timeout" = "" ]; then
+	omx_timeout=30
+fi
+
+# Set a variables for PID file and Display Sequence file
+PIDFILE=/var/run/displaycameras.pid
+DISPLAY_SEQUENCE_FILE=/tmp/displaycameras.seq
+MPV_RUNDIR=/var/run/displaycameras
+
+# How many cameras do we have?
+cameras="${#camera_names[@]}"
+# Set the max camera rotation sequence as one less than the number of cameras
+# (since it starts at zero).
+max_seq=$((cameras-1))
+# Ensure sequence step value is reasonable
+if [ "$seq_step" = "" ] || [ "$seq_step" -gt "$max_seq" ] || [ "$seq_step" -lt "1" ]; then
+	seq_step=1
+fi
+
+# Figure out the current display sequence or set it to zero if it doesn't exist.
+if [ ! -f $DISPLAY_SEQUENCE_FILE ]; then
+	echo 0 > $DISPLAY_SEQUENCE_FILE
+fi
+declare -i DISPLAY_SEQUENCE
+DISPLAY_SEQUENCE=`cat $DISPLAY_SEQUENCE_FILE`
+
+#Functions
+
+geometry_to_mpv() {
+	read x1 y1 x2 y2 <<< "$1"
+	width=$((x2 - x1 + 1))
+	height=$((y2 - y1 + 1))
+	echo "${width}x${height}+${x1}+${y1}"
+}
+
+mpv_socket() {
+	echo "$MPV_RUNDIR/$1.sock"
+}
+
+mpv_pidfile() {
+	echo "$MPV_RUNDIR/$1.pid"
+}
+
+mpv_ipc() {
+	socket="`mpv_socket "$1"`"
+	if [ ! -S "$socket" ]; then
+		return 1
+	fi
+	printf '%s\n' "$2" | socat -t 1 - "$socket" 2>/dev/null
+}
+
+mpv_get_property() {
+	mpv_ipc "$1" "{\"command\":[\"get_property\",\"$2\"]}" | sed -n 's/.*"data":\([^,}]*\).*/\1/p' | tr -d '"'
+}
+
+player_getplaystatus() {
+	case "$player_backend" in
+	omxplayer)
+		omxplayer_dbuscontrol "$1" getplaystatus
+		;;
+	mpv)
+		pidfile="`mpv_pidfile "$1"`"
+		if [ -r "$pidfile" ] && kill -0 "`cat "$pidfile"`" 2>/dev/null; then
+			echo "Playing"
+		else
+			echo "Stopped"
+		fi
+		;;
+	esac
+}
+
+player_getposition() {
+	case "$player_backend" in
+	omxplayer)
+		omxplayer_dbuscontrol "$1" getposition
+		;;
+	mpv)
+		position="`mpv_get_property "$1" playback-time`"
+		position="${position%.*}"
+		if [ "$position" = "" ] || [ "$position" = "null" ]; then
+			position=0
+		fi
+		echo "${position}s"
+		;;
+	esac
+}
+
+player_status() {
+	case "$player_backend" in
+	omxplayer)
+		omxplayer_dbuscontrol "$1" status 2>/dev/null
+		;;
+	mpv)
+		status="`player_getplaystatus "$1"`"
+		position="`player_getposition "$1"`"
+		if [ "$status" = "Playing" ]; then
+			echo "Playing mpv"
+			echo "at $position"
+		fi
+		;;
+	esac
+}
+
+player_quit() {
+	case "$player_backend" in
+	omxplayer)
+		omxplayer_dbuscontrol "$1" quit
+		;;
+	mpv)
+		mpv_ipc "$1" '{"command":["quit"]}' >/dev/null
+		pidfile="`mpv_pidfile "$1"`"
+		if [ -r "$pidfile" ]; then
+			kill "`cat "$pidfile"`" 2>/dev/null
+			rm -f "$pidfile" "`mpv_socket "$1"`"
+		fi
+		;;
+	esac
+}
+
+start_player() {
+	i="$1"
+	x="$2"
+	case "$player_backend" in
+	omxplayer)
+		player="omxplayer --no-keys --no-osd --avdict rtsp_transport:tcp --win \"${window_positions[$x]}\" \"${camera_feeds[$i]}\" --live -n -1 --timeout "$omx_timeout" --dbus_name "org.mpris.MediaPlayer2.omxplayer.${camera_names[$i]}" >/dev/null &"
+		eval $player
+		;;
+	mpv)
+		[ -d "$MPV_RUNDIR" ] || mkdir -p "$MPV_RUNDIR"
+		socket="`mpv_socket "${camera_names[$i]}"`"
+		pidfile="`mpv_pidfile "${camera_names[$i]}"`"
+		rm -f "$socket" "$pidfile"
+		geometry="`geometry_to_mpv "${window_positions[$x]}"`"
+		mpv --no-terminal --force-window=yes --title="displaycameras-${camera_names[$i]}" --geometry="$geometry" --profile=low-latency --rtsp-transport=tcp --input-ipc-server="$socket" "${camera_feeds[$i]}" >/dev/null 2>&1 &
+		echo $! > "$pidfile"
+		;;
+	esac
+}
+
+restart_mpv_players() {
+	if [ "$player_backend" != "mpv" ]; then
+		return
+	fi
+	for name in "${camera_names[@]}"
+	do
+		player_quit "$name"
+	done
+	sleep 1
+	for i in ${!camera_names[*]}
+	do
+		x=$((i+$DISPLAY_SEQUENCE))
+		if [ "$x" -ge "${#camera_names[@]}" ]; then x=$((x-${#camera_names[@]})); fi
+		echo "Starting mpv for ${camera_names[$i]}"
+		start_player "$i" "$x"
+	done
+}
+
+case "$1" in
+# Start displaying camera feeds
+start)
+if [ -f $PIDFILE ]; then
+	echo "PID file exists!  Stop or Restart this service instead."
+exit 1
+fi
+if [ "$blank" = "true" ]; then
+	echo "Blanking screen"
+	fbi --noverbose -T 2 /usr/bin/black.png >/dev/null 2>&1 &
+fi
+if [ "$displaydetectactive" = "true" ]; then
+	echo "Display detection is active for $mode resolution."
+fi
+startupfailure=false
+feedfailure=false
+for i in ${!camera_names[*]}
+do
+	startupretry=0
+	feedretry=0
+	x=$((i+$DISPLAY_SEQUENCE))
+	if [ "$x" -ge "${#camera_names[@]}" ]; then x=$((x-${#camera_names[@]}))
+	fi
+	echo "Starting $player_backend for ${camera_names[$i]}"
+	start_player "$i" "$x"
+	sleep $startsleep
+	while [ "`player_getplaystatus ${camera_names[$i]}`" != "Playing" ]
+	do
+		sleep 1
+		echo "Waiting for ${camera_names[$i]} $player_backend startup $startupretry"
+		if [ "$startupretry" -eq "$retry" ]; then
+			break
+		fi
+		startupretry=$((startupretry+1))
+	done
+	if [ "`player_getplaystatus ${camera_names[$i]}`" = "Playing" ]
+	then
+		sleep $feedsleep
+		while [ "`player_getposition ${camera_names[$i]}`" = "0s" ]
+		do
+			sleep 1
+			echo "Waiting for ${camera_names[$i]} playback $feedretry"
+			if [ "$feedretry" -eq "$retry" ]; then
+				player_quit "${camera_names[$i]}"
+				feedfailure=true
+				break
+			fi
+		feedretry=$((feedretry+1))
+		done
+	else
+		startupfailure=true
+	fi
+	if [ "`player_getplaystatus ${camera_names[$i]}`" = "Playing" ] && [ "`player_getposition ${camera_names[$i]}`" != "0s" ]; then
+		echo "${camera_names[$i]} started"
+	else
+		echo "${camera_names[$i]} failed playback"
+	fi
+done
+touch $PIDFILE
+# One go at a repair job if not all displays start correctly
+if [ "$startupfailure" = "true" ] || [ "$feedfailure" = "true" ]; then
+	echo "Running a repair on failed feeds."
+	$0 repair startup
+fi
+echo "Camera Display Started"
+echo "For complete status info, run"
+echo "/usr/bin/displaycameras status."
+if [ "$rotate" = "true" ]; then
+	if [ "$rotatedelay" = "" ]; then
+		rotatedelay=5
+	fi
+	echo "Starting camera rotation"
+	rotatedisplays $rotatedelay $seq_step &
+fi
+;;
+
+# Stop displaying camera feeds
+stop)
+rm -f $PIDFILE
+rm -f $DISPLAY_SEQUENCE_FILE
+if [ "$rotate" = "true" ]; then
+	pkill rotatedisplays
+fi
+for i in ${camera_names[@]}
+do
+	player_quit "$i"
+done
+sleep 2
+if [ "$blank" = "true" ]; then
+	pkill fbi
+fi
+killall omxplayer.bin > /dev/null 2>&1
+killall mpv > /dev/null 2>&1
+echo "Camera Display Stopped"
+exit 0
+;;
+
+# Restart
+restart)
+$0 stop
+sleep 1
+$0 start
+;;
+
+# Restart any camera feeds that don't claim to be playing or restart the service
+# if too many omxplayer.bin instances are active.
+repair)
+# Do nothing unless the service PID file exists
+if [ ! -f $PIDFILE ]; then exit 0; fi
+# Stop and start the service if we have too many omxplayers
+if [ "$player_backend" = "omxplayer" ] && [ `pgrep -c omxplayer.bin` -gt $cameras ]
+then
+	$0 restart
+fi
+# The actual repair part
+for i in ${!camera_names[*]}
+do
+	if [ "`player_getplaystatus ${camera_names[$i]}`" != "Playing" -o "`player_getposition ${camera_names[$i]}`" = "0s" ]
+	then
+		rm -f $PIDFILE
+		pkill rotatedisplays
+		player_quit "${camera_names[$i]}"
+		x=$((i+$DISPLAY_SEQUENCE))
+		if [ "$x" -ge "${#camera_names[@]}" ]; then x=$((x-${#camera_names[@]}))
+		fi
+		echo "Starting $player_backend for ${camera_names[$i]}"
+		start_player "$i" "$x"
+		sleep $startsleep
+		startupretry=0
+		feedretry=0
+		while [ "`player_getplaystatus ${camera_names[$i]}`" != "Playing" ]
+		do
+			sleep 1
+			echo "Waiting for ${camera_names[$i]} $player_backend startup $startupretry"
+			if [ "$startupretry" -eq "$retry" ]; then
+				break
+			fi
+			startupretry=$((startupretry+1))
+		done
+		if [ "`player_getplaystatus ${camera_names[$i]}`" = "Playing" ]
+		then
+			sleep $feedsleep
+			while [ "`player_getposition ${camera_names[$i]}`" = "0s" ]
+			do
+				sleep 1
+				echo "Waiting for ${camera_names[$i]} playback $feedretry"
+				if [ "$feedretry" -eq "$retry" ]; then
+					player_quit "${camera_names[$i]}"
+					feedfailure=true
+					break
+				fi
+				feedretry=$((feedretry+1))
+			done
+		else
+			startupfailure=true
+		fi
+		if [ "`player_getplaystatus ${camera_names[$i]}`" = "Playing" ] && [ "`player_getposition ${camera_names[$i]}`" != "0s" ]; then
+			echo "${camera_names[$i]} started"
+		else
+			echo "${camera_names[$i]} failed playback"
+		fi
+		touch $PIDFILE
+		if [ "$rotate" = "true" ]; then
+			if [ "$rotatedelay" = "" ]; then
+				rotatedelay=5
+			fi
+			if [ "$2" != "startup" ]; then
+				echo "Restarting camera rotation"
+				rotatedisplays $rotatedelay $seq_step &
+			fi
+		fi
+	fi
+done
+;;
+
+rotate)
+# Do nothing unless the service PID file exists
+if [ ! -f $PIDFILE ]; then exit 0; fi
+DISPLAY_SEQUENCE=$((DISPLAY_SEQUENCE-$seq_step))
+if [ "$DISPLAY_SEQUENCE" -lt "0" ]; then
+        DISPLAY_SEQUENCE="$max_seq"
+fi
+for i in ${!camera_names[*]}
+do
+	if [ "$player_backend" = "mpv" ]; then
+		restart_mpv_players
+		break
+	fi
+        y=$((i-DISPLAY_SEQUENCE-1))
+        if [ "$y" -lt "0" ]; then y=$((y+"${#camera_names[@]}"))
+        fi
+        if [ "$y" -ge "${#camera_names[@]}" ]; then y=$((y-"${#camera_names[@]}"
+))
+        fi
+        x=$((y+$DISPLAY_SEQUENCE))
+        if [ "$x" -ge "${#camera_names[@]}" ]; then x=$((x-"${#camera_names[@]}"
+))
+        fi
+        eval omxplayer_dbuscontrol "${camera_names[$y]}" setvideopos \"${window_positions[$x]}\"
+done
+echo $DISPLAY_SEQUENCE > $DISPLAY_SEQUENCE_FILE
+;;
+
+rotaterev)
+if [ ! -f $PIDFILE ]; then exit 0; fi
+DISPLAY_SEQUENCE=$((DISPLAY_SEQUENCE+$seq_step))
+if [ "$DISPLAY_SEQUENCE" -ge "${#camera_names[@]}" ]; then
+        DISPLAY_SEQUENCE=0
+fi
+for i in ${!camera_names[*]}
+do
+	if [ "$player_backend" = "mpv" ]; then
+		restart_mpv_players
+		break
+	fi
+        y=$((i-DISPLAY_SEQUENCE+1))
+        if [ "$y" -lt "0" ]; then y=$((y+"${#camera_names[@]}"))
+        fi
+        if [ "$y" -ge "${#camera_names[@]}" ]; then y=$((y-"${#camera_names[@]}"))
+        fi
+        x=$((y+$DISPLAY_SEQUENCE))
+        if [ "$x" -ge "${#camera_names[@]}" ]; then x=$((x-"${#camera_names[@]}"))
+        fi
+        eval omxplayer_dbuscontrol "${camera_names[$y]}" setvideopos \"${window_positions[$x]}\"
+done
+echo $DISPLAY_SEQUENCE > $DISPLAY_SEQUENCE_FILE
+;;
+
+status)
+for i in "${camera_names[@]}"
+do
+	status="`player_status $i`"
+	if [[ "$status" != "Playing"* ]]; then
+		echo "$i is NOT playing"
+	else
+		echo "$i is $status"
+	fi
+done
+;;
+
+positions)
+for i in "${camera_names[@]}"
+do
+	position="`player_getposition $i`"
+	echo "$position $i"
+done
+;;
+
+*)
+echo "Usage: /usr/bin/displaycameras {start|stop|restart|repair|status|positions|rotate|rotaterev}"
+exit 1
+;;
+esac
