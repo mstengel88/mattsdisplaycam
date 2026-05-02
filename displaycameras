@@ -120,6 +120,7 @@ PIDFILE=/var/run/displaycameras.pid
 DISPLAY_SEQUENCE_FILE=/tmp/displaycameras.seq
 MPV_RUNDIR=/var/run/displaycameras
 MPV_LOGDIR=/var/log/displaycameras
+MPV_GRID_NAME=grid
 
 # How many cameras do we have?
 cameras="${#camera_names[@]}"
@@ -184,6 +185,18 @@ mpv_logfile() {
 	echo "$MPV_LOGDIR/$1.mpv.log"
 }
 
+mpv_grid_socket() {
+	echo "$MPV_RUNDIR/$MPV_GRID_NAME.sock"
+}
+
+mpv_grid_pidfile() {
+	echo "$MPV_RUNDIR/$MPV_GRID_NAME.pid"
+}
+
+mpv_grid_logfile() {
+	echo "$MPV_LOGDIR/$MPV_GRID_NAME.mpv.log"
+}
+
 mpv_display_env() {
 	if [ "$display_user" = "" ]; then
 		display_user=pi
@@ -233,6 +246,18 @@ mpv_command() {
 
 mpv_command_as_display_user() {
 	exec runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XAUTHORITY="$XAUTHORITY" mpv --no-terminal --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-$1" --geometry="$2" --profile=low-latency --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$3" "$4"
+}
+
+mpv_grid_filter() {
+	echo '[vid1]scale=960:540:force_original_aspect_ratio=decrease,pad=960:540:(ow-iw)/2:(oh-ih)/2[v1];[vid2]scale=960:540:force_original_aspect_ratio=decrease,pad=960:540:(ow-iw)/2:(oh-ih)/2[v2];[vid3]scale=960:540:force_original_aspect_ratio=decrease,pad=960:540:(ow-iw)/2:(oh-ih)/2[v3];[vid4]scale=960:540:force_original_aspect_ratio=decrease,pad=960:540:(ow-iw)/2:(oh-ih)/2[v4];[v1][v2]hstack[top];[v3][v4]hstack[bottom];[top][bottom]vstack[vo]'
+}
+
+mpv_grid_command() {
+	exec mpv --no-terminal --fs --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-grid" --profile=low-latency --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$1" --lavfi-complex="$2" "$3" "$4" "$5" "$6"
+}
+
+mpv_grid_command_as_display_user() {
+	exec runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XAUTHORITY="$XAUTHORITY" mpv --no-terminal --fs --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-grid" --profile=low-latency --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$1" --lavfi-complex="$2" "$3" "$4" "$5" "$6"
 }
 
 mpv_ipc() {
@@ -318,6 +343,57 @@ player_quit() {
 	esac
 }
 
+grid_getplaystatus() {
+	pidfile="`mpv_grid_pidfile`"
+	socket="`mpv_grid_socket`"
+	if [ -r "$pidfile" ] && kill -0 "`cat "$pidfile"`" 2>/dev/null && [ -S "$socket" ]; then
+		echo "Playing"
+	elif [ -r "$pidfile" ] && kill -0 "`cat "$pidfile"`" 2>/dev/null; then
+		echo "Starting"
+	else
+		echo "Stopped"
+	fi
+}
+
+grid_quit() {
+	socket="`mpv_grid_socket`"
+	if [ -S "$socket" ]; then
+		printf '%s\n' '{"command":["quit"]}' | socat -t 1 - "$socket" >/dev/null 2>&1
+	fi
+	pidfile="`mpv_grid_pidfile`"
+	if [ -r "$pidfile" ]; then
+		kill "`cat "$pidfile"`" 2>/dev/null
+		rm -f "$pidfile" "$socket"
+	fi
+}
+
+start_mpv_grid() {
+	if [ "$cameras" -lt 4 ]; then
+		echo "mpv_grid requires at least four configured cameras."
+		return 1
+	fi
+	[ -d "$MPV_RUNDIR" ] || mkdir -p "$MPV_RUNDIR"
+	[ -d "$MPV_LOGDIR" ] || mkdir -p "$MPV_LOGDIR"
+	mpv_display_env || return 1
+	if [ "$EUID" -eq 0 ]; then
+		chown "$display_user" "$MPV_RUNDIR"
+	fi
+	socket="`mpv_grid_socket`"
+	pidfile="`mpv_grid_pidfile`"
+	logfile="`mpv_grid_logfile`"
+	filter="`mpv_grid_filter`"
+	rm -f "$socket" "$pidfile"
+	echo "Starting 2x2 grid at `date`" > "$logfile"
+	echo "DISPLAY=$DISPLAY XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAND_DISPLAY XAUTHORITY=$XAUTHORITY" >> "$logfile"
+	echo "feeds: ${camera_names[0]}, ${camera_names[1]}, ${camera_names[2]}, ${camera_names[3]}" >> "$logfile"
+	if [ "$EUID" -eq 0 ]; then
+		mpv_grid_command_as_display_user "$socket" "$filter" "${camera_feeds[0]}" "${camera_feeds[1]}" "${camera_feeds[2]}" "${camera_feeds[3]}" >> "$logfile" 2>&1 &
+	else
+		mpv_grid_command "$socket" "$filter" "${camera_feeds[0]}" "${camera_feeds[1]}" "${camera_feeds[2]}" "${camera_feeds[3]}" >> "$logfile" 2>&1 &
+	fi
+	echo $! > "$pidfile"
+}
+
 start_player() {
 	i="$1"
 	x="$2"
@@ -373,6 +449,7 @@ doctor)
 echo "displaycameras doctor"
 echo "backend: $player_backend"
 echo "display_user: ${display_user:-pi}"
+echo "mpv_grid: ${mpv_grid:-false}"
 echo "cameras: $cameras"
 if [ "$validation_failed" = "true" ]; then
 	echo "config: FAILED"
@@ -410,6 +487,7 @@ start)
 if [ -f $PIDFILE ]; then
 	echo "PID file exists; clearing stale displaycameras state before start."
 	rm -f $PIDFILE
+	grid_quit
 	for i in "${camera_names[@]}"
 	do
 		player_quit "$i"
@@ -422,6 +500,28 @@ if [ "$blank" = "true" ]; then
 fi
 if [ "$displaydetectactive" = "true" ]; then
 	echo "Display detection is active for $mode resolution."
+fi
+if [ "$player_backend" = "mpv" ] && [ "$mpv_grid" = "true" ]; then
+	echo "Starting mpv fullscreen 2x2 grid"
+	start_mpv_grid
+	sleep $startsleep
+	startupretry=0
+	while [ "`grid_getplaystatus`" != "Playing" ]
+	do
+		sleep 1
+		echo "Waiting for mpv grid startup $startupretry"
+		if [ "$startupretry" -eq "$retry" ]; then
+			echo "mpv grid failed playback"
+			echo "See `mpv_grid_logfile`"
+			exit 1
+		fi
+		startupretry=$((startupretry+1))
+	done
+	touch $PIDFILE
+	echo "Camera Display Started"
+	echo "For complete status info, run"
+	echo "/usr/bin/displaycameras status."
+	exit 0
 fi
 startupfailure=false
 feedfailure=false
@@ -489,6 +589,7 @@ fi
 stop)
 rm -f $PIDFILE
 rm -f $DISPLAY_SEQUENCE_FILE
+grid_quit
 if [ "$rotate" = "true" ]; then
 	pkill rotatedisplays
 fi
@@ -638,6 +739,11 @@ echo $DISPLAY_SEQUENCE > $DISPLAY_SEQUENCE_FILE
 ;;
 
 status)
+if [ "$player_backend" = "mpv" ] && [ "$mpv_grid" = "true" ]; then
+	status="`grid_getplaystatus`"
+	echo "2x2 grid is $status"
+	exit 0
+fi
 for i in "${camera_names[@]}"
 do
 	status="`player_status $i`"
