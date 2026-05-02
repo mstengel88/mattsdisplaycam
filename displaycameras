@@ -123,27 +123,31 @@ MPV_LOGDIR=/var/log/displaycameras
 
 # How many cameras do we have?
 cameras="${#camera_names[@]}"
+validation_failed=false
 if [ "$cameras" -eq 0 ]; then
 	echo "No cameras are configured in /etc/displaycameras/layout.conf.default."
-	exit 1
+	validation_failed=true
 fi
 if [ "$cameras" -ne "${#camera_feeds[@]}" ]; then
 	echo "camera_names and camera_feeds must contain the same number of entries."
-	exit 1
+	validation_failed=true
 fi
 if [ "$cameras" -gt "${#window_positions[@]}" ]; then
 	echo "There must be at least as many window_positions as camera_names."
-	exit 1
+	validation_failed=true
 fi
 for i in ${!camera_feeds[*]}
 do
 	case "${camera_feeds[$i]}" in
 	""|"<Camera stream URL>"|rtsp://user:password@camera-*.example/stream)
 		echo "Camera feed for ${camera_names[$i]} still uses a placeholder URL."
-		exit 1
+		validation_failed=true
 		;;
 	esac
 done
+if [ "$1" != "doctor" ] && [ "$validation_failed" = "true" ]; then
+	exit 1
+fi
 # Set the max camera rotation sequence as one less than the number of cameras
 # (since it starts at zero).
 max_seq=$((cameras-1))
@@ -365,6 +369,42 @@ restart_mpv_players() {
 }
 
 case "$1" in
+doctor)
+echo "displaycameras doctor"
+echo "backend: $player_backend"
+echo "display_user: ${display_user:-pi}"
+echo "cameras: $cameras"
+if [ "$validation_failed" = "true" ]; then
+	echo "config: FAILED"
+else
+	echo "config: ok"
+fi
+for i in ${!camera_names[*]}
+do
+	echo "$((i+1)). ${camera_names[$i]} -> ${window_positions[$i]} -> ${camera_feeds[$i]}"
+done
+case "$player_backend" in
+mpv)
+	if command -v mpv >/dev/null 2>&1; then echo "mpv: ok"; else echo "mpv: missing"; fi
+	if command -v socat >/dev/null 2>&1; then echo "socat: ok"; else echo "socat: missing"; fi
+	if command -v runuser >/dev/null 2>&1; then echo "runuser: ok"; else echo "runuser: missing"; fi
+	mpv_display_env
+	if [ $? -eq 0 ]; then
+		echo "display session: ok"
+		echo "DISPLAY=$DISPLAY"
+		echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+		echo "WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+		echo "XAUTHORITY=$XAUTHORITY"
+	else
+		echo "display session: FAILED"
+	fi
+	;;
+esac
+if [ "$validation_failed" = "true" ]; then
+	exit 1
+fi
+;;
+
 # Start displaying camera feeds
 start)
 if [ -f $PIDFILE ]; then
@@ -613,7 +653,7 @@ done
 ;;
 
 *)
-echo "Usage: /usr/bin/displaycameras {start|stop|restart|repair|status|positions|rotate|rotaterev}"
+echo "Usage: /usr/bin/displaycameras {start|stop|restart|repair|status|positions|doctor|rotate|rotaterev}"
 exit 1
 ;;
 esac
