@@ -118,6 +118,12 @@ fi
 if [ "$display_wait" = "" ]; then
 	display_wait=90
 fi
+if [ "$grid_fps" = "" ]; then
+	grid_fps=6
+fi
+if [ "$grid_refresh_minutes" = "" ]; then
+	grid_refresh_minutes=15
+fi
 
 # Set a variables for PID file and Display Sequence file
 PIDFILE=/var/run/displaycameras.pid
@@ -202,6 +208,10 @@ mpv_grid_pidfile() {
 	echo "$MPV_RUNDIR/$MPV_GRID_NAME.pid"
 }
 
+mpv_grid_startfile() {
+	echo "$MPV_RUNDIR/$MPV_GRID_NAME.started"
+}
+
 mpv_grid_logfile() {
 	echo "$MPV_LOGDIR/$MPV_GRID_NAME.mpv.log"
 }
@@ -260,15 +270,15 @@ mpv_command_as_display_user() {
 mpv_grid_filter() {
 	tile_width=$((GRID_WIDTH / 2))
 	tile_height=$((GRID_HEIGHT / 2))
-	echo "[0:v]scale=${tile_width}:${tile_height}:force_original_aspect_ratio=decrease,pad=${tile_width}:${tile_height}:(ow-iw)/2:(oh-ih)/2[v0];[1:v]scale=${tile_width}:${tile_height}:force_original_aspect_ratio=decrease,pad=${tile_width}:${tile_height}:(ow-iw)/2:(oh-ih)/2[v1];[2:v]scale=${tile_width}:${tile_height}:force_original_aspect_ratio=decrease,pad=${tile_width}:${tile_height}:(ow-iw)/2:(oh-ih)/2[v2];[3:v]scale=${tile_width}:${tile_height}:force_original_aspect_ratio=decrease,pad=${tile_width}:${tile_height}:(ow-iw)/2:(oh-ih)/2[v3];[v0][v1][v2][v3]xstack=inputs=4:layout=0_0|${tile_width}_0|0_${tile_height}|${tile_width}_${tile_height}[v]"
+	echo "[0:v]scale=${tile_width}:${tile_height}:force_original_aspect_ratio=decrease,pad=${tile_width}:${tile_height}:(ow-iw)/2:(oh-ih)/2[v0];[1:v]scale=${tile_width}:${tile_height}:force_original_aspect_ratio=decrease,pad=${tile_width}:${tile_height}:(ow-iw)/2:(oh-ih)/2[v1];[2:v]scale=${tile_width}:${tile_height}:force_original_aspect_ratio=decrease,pad=${tile_width}:${tile_height}:(ow-iw)/2:(oh-ih)/2[v2];[3:v]scale=${tile_width}:${tile_height}:force_original_aspect_ratio=decrease,pad=${tile_width}:${tile_height}:(ow-iw)/2:(oh-ih)/2[v3];[v0][v1][v2][v3]xstack=inputs=4:layout=0_0|${tile_width}_0|0_${tile_height}|${tile_width}_${tile_height}[stack];[stack]fps=${grid_fps}[v]"
 }
 
 mpv_grid_command() {
-	ffmpeg -hide_banner -loglevel warning -nostdin -rtsp_transport tcp -i "$3" -rtsp_transport tcp -i "$4" -rtsp_transport tcp -i "$5" -rtsp_transport tcp -i "$6" -filter_complex "$2" -map "[v]" -an -c:v rawvideo -pix_fmt yuv420p -f nut - | exec mpv --no-terminal --fs --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-grid" --profile=low-latency --untimed --no-cache --input-ipc-server="$1" -
+	ffmpeg -hide_banner -loglevel warning -nostdin -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$3" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$4" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$5" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$6" -filter_complex "$2" -map "[v]" -an -c:v rawvideo -pix_fmt yuv420p -flush_packets 1 -f nut - | exec mpv --no-terminal --fs --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-grid" --profile=low-latency --no-cache --input-ipc-server="$1" -
 }
 
 mpv_grid_command_as_display_user() {
-	exec runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XAUTHORITY="$XAUTHORITY" bash -c 'ffmpeg -hide_banner -loglevel warning -nostdin -rtsp_transport tcp -i "$3" -rtsp_transport tcp -i "$4" -rtsp_transport tcp -i "$5" -rtsp_transport tcp -i "$6" -filter_complex "$2" -map "[v]" -an -c:v rawvideo -pix_fmt yuv420p -f nut - | exec mpv --no-terminal --fs --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-grid" --profile=low-latency --untimed --no-cache --input-ipc-server="$1" -' _ "$1" "$2" "$3" "$4" "$5" "$6"
+	exec runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XAUTHORITY="$XAUTHORITY" bash -c 'ffmpeg -hide_banner -loglevel warning -nostdin -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$3" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$4" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$5" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$6" -filter_complex "$2" -map "[v]" -an -c:v rawvideo -pix_fmt yuv420p -flush_packets 1 -f nut - | exec mpv --no-terminal --fs --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-grid" --profile=low-latency --no-cache --input-ipc-server="$1" -' _ "$1" "$2" "$3" "$4" "$5" "$6"
 }
 
 mpv_ipc() {
@@ -376,6 +386,7 @@ grid_quit() {
 		kill "`cat "$pidfile"`" 2>/dev/null
 		rm -f "$pidfile" "$socket"
 	fi
+	rm -f "`mpv_grid_startfile`"
 	pkill -f 'title=displaycameras-grid' >/dev/null 2>&1
 	pkill -f 'displaycameras-grid' >/dev/null 2>&1
 	for i in "${camera_names[@]}"
@@ -401,11 +412,13 @@ start_mpv_grid() {
 	fi
 	socket="`mpv_grid_socket`"
 	pidfile="`mpv_grid_pidfile`"
+	startfile="`mpv_grid_startfile`"
 	logfile="`mpv_grid_logfile`"
 	filter="`mpv_grid_filter`"
 	rm -f "$socket" "$pidfile"
 	echo "Starting 2x2 grid at `date`" > "$logfile"
 	echo "DISPLAY=$DISPLAY XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAND_DISPLAY XAUTHORITY=$XAUTHORITY" >> "$logfile"
+	echo "grid_fps=$grid_fps grid_refresh_minutes=$grid_refresh_minutes" >> "$logfile"
 	echo "feeds: ${camera_names[0]}, ${camera_names[1]}, ${camera_names[2]}, ${camera_names[3]}" >> "$logfile"
 	if [ "$EUID" -eq 0 ]; then
 		mpv_grid_command_as_display_user "$socket" "$filter" "${camera_feeds[0]}" "${camera_feeds[1]}" "${camera_feeds[2]}" "${camera_feeds[3]}" >> "$logfile" 2>&1 &
@@ -413,6 +426,7 @@ start_mpv_grid() {
 		mpv_grid_command "$socket" "$filter" "${camera_feeds[0]}" "${camera_feeds[1]}" "${camera_feeds[2]}" "${camera_feeds[3]}" >> "$logfile" 2>&1 &
 	fi
 	echo $! > "$pidfile"
+	date +%s > "$startfile"
 }
 
 start_player() {
@@ -471,6 +485,8 @@ echo "displaycameras doctor"
 echo "backend: $player_backend"
 echo "display_user: ${display_user:-pi}"
 echo "mpv_grid: ${mpv_grid:-false}"
+echo "grid_fps: $grid_fps"
+echo "grid_refresh_minutes: $grid_refresh_minutes"
 echo "cameras: $cameras"
 if [ "$validation_failed" = "true" ]; then
 	echo "config: FAILED"
@@ -648,6 +664,22 @@ if [ "$player_backend" = "mpv" ] && [ "$mpv_grid" = "true" ]; then
 		start_mpv_grid
 		sleep $startsleep
 		touch $PIDFILE
+	elif [ "$grid_refresh_minutes" != "0" ]; then
+		startfile="`mpv_grid_startfile`"
+		if [ -r "$startfile" ]; then
+			now="`date +%s`"
+			started="`cat "$startfile"`"
+			max_age=$((grid_refresh_minutes * 60))
+			age=$((now - started))
+			if [ "$age" -gt "$max_age" ]; then
+				echo "Refreshing mpv 2x2 grid after ${age}s"
+				rm -f $PIDFILE
+				grid_quit
+				start_mpv_grid
+				sleep $startsleep
+				touch $PIDFILE
+			fi
+		fi
 	fi
 	exit 0
 fi
