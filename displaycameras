@@ -159,6 +159,12 @@ do
 		echo "Camera feed for ${camera_names[$i]} still uses a placeholder URL."
 		validation_failed=true
 		;;
+	rtsps://*enableSrtp*)
+		if [ "$player_backend" = "mpv" ] && [ "$mpv_grid" = "true" ]; then
+			echo "Camera feed for ${camera_names[$i]} is a UniFi SRTP URL; ffmpeg grid needs a plain rtsp:// stream."
+			validation_failed=true
+		fi
+		;;
 	esac
 done
 if [ "$1" != "doctor" ] && [ "$validation_failed" = "true" ]; then
