@@ -131,6 +131,7 @@ DISPLAY_SEQUENCE_FILE=/tmp/displaycameras.seq
 MPV_RUNDIR=/var/run/displaycameras
 MPV_LOGDIR=/var/log/displaycameras
 MPV_GRID_NAME=grid
+MPV_WINDOWS_STARTFILE=$MPV_RUNDIR/windows.started
 GRID_WIDTH=1920
 GRID_HEIGHT=1080
 
@@ -268,11 +269,11 @@ mpv_display_env() {
 }
 
 mpv_command() {
-	exec mpv --no-terminal --vo=x11 --force-window=yes --ontop --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-$1" --geometry="$2" --profile=low-latency --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$3" "$4"
+	exec mpv --no-terminal --vo=x11 --force-window=yes --ontop --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-$1" --geometry="$2" --profile=low-latency --no-cache --demuxer-readahead-secs=0 --demuxer-max-bytes=1048576 --framedrop=vo --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$3" "$4"
 }
 
 mpv_command_as_display_user() {
-	exec runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" XAUTHORITY="$XAUTHORITY" XDG_SESSION_TYPE=x11 mpv --no-terminal --vo=x11 --force-window=yes --ontop --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-$1" --geometry="$2" --profile=low-latency --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$3" "$4"
+	exec runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" XAUTHORITY="$XAUTHORITY" XDG_SESSION_TYPE=x11 mpv --no-terminal --vo=x11 --force-window=yes --ontop --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-$1" --geometry="$2" --profile=low-latency --no-cache --demuxer-readahead-secs=0 --demuxer-max-bytes=1048576 --framedrop=vo --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$3" "$4"
 }
 
 mpv_grid_filter() {
@@ -632,6 +633,9 @@ do
 	fi
 done
 touch $PIDFILE
+if [ "$player_backend" = "mpv" ] && [ "$mpv_grid" = "windows" ]; then
+	date +%s > "$MPV_WINDOWS_STARTFILE"
+fi
 # One go at a repair job if not all displays start correctly
 if [ "$startupfailure" = "true" ] || [ "$feedfailure" = "true" ]; then
 	echo "Running a repair on failed feeds."
@@ -653,6 +657,7 @@ fi
 stop)
 rm -f $PIDFILE
 rm -f $DISPLAY_SEQUENCE_FILE
+rm -f "$MPV_WINDOWS_STARTFILE"
 grid_quit
 if [ "$rotate" = "true" ]; then
 	pkill rotatedisplays
@@ -709,6 +714,21 @@ if [ "$player_backend" = "mpv" ] && [ "$mpv_grid" = "true" ]; then
 		fi
 	fi
 	exit 0
+fi
+if [ "$player_backend" = "mpv" ] && [ "$mpv_grid" = "windows" ] && [ "$grid_refresh_minutes" != "0" ]; then
+	if [ -r "$MPV_WINDOWS_STARTFILE" ]; then
+		now="`date +%s`"
+		started="`cat "$MPV_WINDOWS_STARTFILE"`"
+		max_age=$((grid_refresh_minutes * 60))
+		age=$((now - started))
+		if [ "$age" -gt "$max_age" ]; then
+			echo "Refreshing mpv SRTP windows after ${age}s"
+			$0 restart
+			exit 0
+		fi
+	else
+		date +%s > "$MPV_WINDOWS_STARTFILE"
+	fi
 fi
 # Stop and start the service if we have too many omxplayers
 if [ "$player_backend" = "omxplayer" ] && [ `pgrep -c omxplayer.bin` -gt $cameras ]
