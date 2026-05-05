@@ -72,10 +72,6 @@ write_four_camera_layout() {
 			echo "Skipping placeholder feed for ${parsed_names[$i]:-Camera$((i+1))}"
 			continue
 			;;
-		rtsps://*enableSrtp*)
-			echo "Skipping UniFi SRTP feed for ${parsed_names[$i]:-Camera$((i+1))}; ffmpeg grid needs plain rtsp://"
-			continue
-			;;
 		esac
 		selected_names+=("${parsed_names[$i]:-Camera$((i+1))}")
 		selected_feeds+=("${parsed_feeds[$i]}")

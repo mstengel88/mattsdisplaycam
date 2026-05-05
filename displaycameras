@@ -140,6 +140,7 @@ if [ "$player_backend" = "mpv" ] && [ "$cameras" -eq 4 ] && [ "$mpv_grid" = "" ]
 	mpv_grid=true
 fi
 validation_failed=false
+uses_srtp=false
 if [ "$cameras" -eq 0 ]; then
 	echo "No cameras are configured in /etc/displaycameras/layout.conf.default."
 	validation_failed=true
@@ -160,13 +161,14 @@ do
 		validation_failed=true
 		;;
 	rtsps://*enableSrtp*)
-		if [ "$player_backend" = "mpv" ] && [ "$mpv_grid" = "true" ]; then
-			echo "Camera feed for ${camera_names[$i]} is a UniFi SRTP URL; ffmpeg grid needs a plain rtsp:// stream."
-			validation_failed=true
-		fi
+		uses_srtp=true
 		;;
 	esac
 done
+if [ "$player_backend" = "mpv" ] && [ "$mpv_grid" = "true" ] && [ "$uses_srtp" = "true" ]; then
+	echo "UniFi SRTP feed detected; using mpv window grid mode instead of ffmpeg compositor."
+	mpv_grid=windows
+fi
 if [ "$1" != "doctor" ] && [ "$validation_failed" = "true" ]; then
 	exit 1
 fi
@@ -266,11 +268,11 @@ mpv_display_env() {
 }
 
 mpv_command() {
-	exec mpv --no-terminal --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-$1" --geometry="$2" --profile=low-latency --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$3" "$4"
+	exec mpv --no-terminal --vo=x11 --force-window=yes --ontop --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-$1" --geometry="$2" --profile=low-latency --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$3" "$4"
 }
 
 mpv_command_as_display_user() {
-	exec runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XAUTHORITY="$XAUTHORITY" mpv --no-terminal --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-$1" --geometry="$2" --profile=low-latency --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$3" "$4"
+	exec runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" XAUTHORITY="$XAUTHORITY" XDG_SESSION_TYPE=x11 mpv --no-terminal --vo=x11 --force-window=yes --ontop --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-$1" --geometry="$2" --profile=low-latency --network-timeout="$omx_timeout" --rtsp-transport=tcp --input-ipc-server="$3" "$4"
 }
 
 mpv_grid_filter() {
