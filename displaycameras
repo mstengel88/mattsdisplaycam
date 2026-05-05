@@ -274,11 +274,20 @@ mpv_grid_filter() {
 }
 
 mpv_grid_command() {
-	ffmpeg -hide_banner -loglevel warning -nostdin -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$3" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$4" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$5" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$6" -filter_complex "$2" -map "[v]" -an -c:v rawvideo -pix_fmt yuv420p -flush_packets 1 -f nut - | exec mpv --no-terminal --fs --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-grid" --profile=low-latency --no-cache --input-ipc-server="$1" -
+	ffmpeg -hide_banner -loglevel warning -nostdin -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$3" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$4" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$5" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$6" -filter_complex "$2" -map "[v]" -an -c:v rawvideo -pix_fmt yuv420p -flush_packets 1 -f nut - | exec mpv --no-terminal --fs --ontop --vo=dmabuf-wayland,wlshm,x11 --force-window=immediate --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-grid" --profile=low-latency --no-cache --input-ipc-server="$1" -
 }
 
 mpv_grid_command_as_display_user() {
-	exec runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XAUTHORITY="$XAUTHORITY" bash -c 'ffmpeg -hide_banner -loglevel warning -nostdin -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$3" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$4" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$5" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$6" -filter_complex "$2" -map "[v]" -an -c:v rawvideo -pix_fmt yuv420p -flush_packets 1 -f nut - | exec mpv --no-terminal --fs --force-window=yes --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-grid" --profile=low-latency --no-cache --input-ipc-server="$1" -' _ "$1" "$2" "$3" "$4" "$5" "$6"
+	exec runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XAUTHORITY="$XAUTHORITY" XDG_SESSION_TYPE=wayland bash -c 'ffmpeg -hide_banner -loglevel warning -nostdin -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$3" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$4" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$5" -fflags nobuffer -flags low_delay -probesize 32768 -analyzeduration 1000000 -thread_queue_size 2 -rtsp_transport tcp -i "$6" -filter_complex "$2" -map "[v]" -an -c:v rawvideo -pix_fmt yuv420p -flush_packets 1 -f nut - | exec mpv --no-terminal --fs --ontop --vo=dmabuf-wayland,wlshm,x11 --force-window=immediate --no-border --no-osc --no-input-default-bindings --cursor-autohide=always --title="displaycameras-grid" --profile=low-latency --no-cache --input-ipc-server="$1" -' _ "$1" "$2" "$3" "$4" "$5" "$6"
+}
+
+screen_test() {
+	mpv_display_env || return 1
+	if [ "$EUID" -eq 0 ]; then
+		runuser -u "$display_user" -- env DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XAUTHORITY="$XAUTHORITY" XDG_SESSION_TYPE=wayland mpv --fs --ontop --vo=dmabuf-wayland,wlshm,x11 --force-window=immediate --no-terminal --no-border --title=displaycameras-test av://lavfi:testsrc2=size=1920x1080:rate=10
+	else
+		mpv --fs --ontop --vo=dmabuf-wayland,wlshm,x11 --force-window=immediate --no-terminal --no-border --title=displaycameras-test av://lavfi:testsrc2=size=1920x1080:rate=10
+	fi
 }
 
 mpv_ipc() {
@@ -425,8 +434,14 @@ start_mpv_grid() {
 	else
 		mpv_grid_command "$socket" "$filter" "${camera_feeds[0]}" "${camera_feeds[1]}" "${camera_feeds[2]}" "${camera_feeds[3]}" >> "$logfile" 2>&1 &
 	fi
-	echo $! > "$pidfile"
+	pipeline_pid=$!
+	echo $pipeline_pid > "$pidfile"
 	date +%s > "$startfile"
+	sleep 1
+	if ! kill -0 "$pipeline_pid" 2>/dev/null; then
+		echo "Grid pipeline exited immediately." >> "$logfile"
+		return 1
+	fi
 }
 
 start_player() {
@@ -480,6 +495,10 @@ restart_mpv_players() {
 }
 
 case "$1" in
+screen-test)
+screen_test
+;;
+
 doctor)
 echo "displaycameras doctor"
 echo "backend: $player_backend"
@@ -828,7 +847,7 @@ done
 ;;
 
 *)
-echo "Usage: /usr/bin/displaycameras {start|stop|restart|repair|status|positions|doctor|rotate|rotaterev}"
+echo "Usage: /usr/bin/displaycameras {start|stop|restart|repair|status|positions|doctor|screen-test|rotate|rotaterev}"
 exit 1
 ;;
 esac
