@@ -65,6 +65,7 @@ Viewport tuning lives in `/etc/displaycameras/displaycameras.conf`:
 * `viewport_fps=8`
 * `viewport_latency_ms=150`
 * `viewport_retry_seconds=5`
+* `viewport_player=mpv`
 * `viewport_rtsp_protocol=tcp`
 * `viewport_tls_validation=false`
 * `viewport_sink=auto`

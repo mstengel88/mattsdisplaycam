@@ -273,7 +273,11 @@ if [ -r /etc/displaycameras/displaycameras.conf ]; then
 		echo "viewport_fps=8" >> /etc/displaycameras/displaycameras.conf
 		echo "viewport_latency_ms=150" >> /etc/displaycameras/displaycameras.conf
 		echo "viewport_retry_seconds=5" >> /etc/displaycameras/displaycameras.conf
+		echo "viewport_player=mpv" >> /etc/displaycameras/displaycameras.conf
 		echo "viewport_rtsp_protocol=tcp" >> /etc/displaycameras/displaycameras.conf
+	fi
+	if [ "$viewport" = "true" ] && ! grep -q '^viewport_player=' /etc/displaycameras/displaycameras.conf; then
+		echo "viewport_player=mpv" >> /etc/displaycameras/displaycameras.conf
 	fi
 	if [ "$viewport" = "true" ] && ! grep -q '^viewport_tls_validation=' /etc/displaycameras/displaycameras.conf; then
 		echo "viewport_tls_validation=false" >> /etc/displaycameras/displaycameras.conf

@@ -69,6 +69,7 @@ printf 'setting\0viewport_fps\0%s\0' "${viewport_fps:-8}"
 printf 'setting\0viewport_latency_ms\0%s\0' "${viewport_latency_ms:-150}"
 printf 'setting\0viewport_retry_seconds\0%s\0' "${viewport_retry_seconds:-5}"
 printf 'setting\0viewport_sink\0%s\0' "${viewport_sink:-auto}"
+printf 'setting\0viewport_player\0%s\0' "${viewport_player:-mpv}"
 printf 'setting\0viewport_rtsp_protocol\0%s\0' "${viewport_rtsp_protocol:-tcp}"
 printf 'setting\0viewport_tls_validation\0%s\0' "${viewport_tls_validation:-false}"
 for i in "${!camera_names[@]}"; do
@@ -158,15 +159,16 @@ class Viewport:
         self.fps = max(1, int(settings.get("viewport_fps", "8")))
         self.latency = max(0, int(settings.get("viewport_latency_ms", "150")))
         self.retry_seconds = max(1, int(settings.get("viewport_retry_seconds", "5")))
+        self.viewport_player = settings.get("viewport_player", "mpv").lower()
         self.rtsp_protocol = settings.get("viewport_rtsp_protocol", "tcp")
         self.tls_validation = settings.get("viewport_tls_validation", "false").lower() == "true"
         self.pipeline = Gst.Pipeline.new("displayviewport")
         self.loop = GLib.MainLoop()
-        self.mpv_only = any(self.use_mpv_fallback(camera) for camera in self.cameras)
+        self.mpv_only = self.viewport_player == "mpv" or any(self.use_mpv_fallback(camera) for camera in self.cameras)
 
     def build(self) -> None:
         if self.mpv_only:
-            log("UniFi RTSPS/SRTP feed detected; using managed mpv tiles for the full 2x2 view")
+            log("using managed mpv tiles for the full 2x2 view")
             for camera in self.cameras:
                 self.start_mpv_tile(camera)
             return
@@ -282,9 +284,13 @@ class Viewport:
             "--cursor-autohide=always",
             "--profile=low-latency",
             "--no-cache",
+            "--cache-secs=0",
+            "--demuxer-lavf-o=fflags=+nobuffer,flags=+low_delay,probesize=32768,analyzeduration=0,reorder_queue_size=0",
             "--demuxer-readahead-secs=0",
-            "--demuxer-max-bytes=1048576",
-            "--framedrop=vo",
+            "--demuxer-max-bytes=262144",
+            "--framedrop=decoder+vo",
+            "--vd-lavc-threads=1",
+            "--video-sync=audio",
             "--rtsp-transport=tcp",
             "--network-timeout=10",
             "--vo=x11",
