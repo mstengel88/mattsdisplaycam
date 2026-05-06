@@ -46,6 +46,8 @@ class Camera:
     retry_source: int | None = None
     retry_delay: int = 0
     unsupported_stream: bool = False
+    mpv_process: subprocess.Popen | None = None
+    mpv_monitor_source: int | None = None
 
 
 def log(message: str) -> None:
@@ -177,7 +179,10 @@ class Viewport:
 
         for camera in self.cameras:
             self.add_tile(mix, camera)
-            self.connect_camera(camera)
+            if self.use_mpv_fallback(camera):
+                self.start_mpv_tile(camera)
+            else:
+                self.connect_camera(camera)
 
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
@@ -248,6 +253,72 @@ class Viewport:
 
     def tile_caps(self, camera: Camera) -> Gst.Caps:
         return Gst.Caps.from_string(f"video/x-raw,width={camera.width},height={camera.height}")
+
+    def use_mpv_fallback(self, camera: Camera) -> bool:
+        return camera.uri.startswith("rtsps://") and "enableSrtp" in camera.uri
+
+    def mpv_geometry(self, camera: Camera) -> str:
+        return f"{camera.width}x{camera.height}+{camera.x}+{camera.y}"
+
+    def start_mpv_tile(self, camera: Camera) -> bool:
+        if camera.mpv_process is not None and camera.mpv_process.poll() is None:
+            return False
+        log(f"starting mpv tile for {camera.name}")
+        command = [
+            "mpv",
+            "--no-terminal",
+            "--force-window=immediate",
+            "--no-border",
+            "--ontop",
+            "--no-osc",
+            "--no-input-default-bindings",
+            "--cursor-autohide=always",
+            "--profile=low-latency",
+            "--no-cache",
+            "--demuxer-readahead-secs=0",
+            "--demuxer-max-bytes=1048576",
+            "--framedrop=vo",
+            "--rtsp-transport=tcp",
+            "--network-timeout=10",
+            "--vo=x11",
+            f"--title=displayviewport-{camera.name}",
+            f"--geometry={self.mpv_geometry(camera)}",
+            camera.uri,
+        ]
+        try:
+            camera.mpv_process = subprocess.Popen(command)
+        except FileNotFoundError:
+            log(f"{camera.name} needs mpv installed for UniFi RTSPS/SRTP fallback")
+            return False
+        except Exception as exc:
+            log(f"{camera.name} failed to start mpv tile: {exc}")
+            return False
+        if camera.mpv_monitor_source is None:
+            camera.mpv_monitor_source = GLib.timeout_add_seconds(self.retry_seconds, self.monitor_mpv_tile, camera)
+        return False
+
+    def monitor_mpv_tile(self, camera: Camera) -> bool:
+        if camera.mpv_process is None:
+            self.start_mpv_tile(camera)
+            return True
+        if camera.mpv_process.poll() is not None:
+            log(f"{camera.name} mpv tile exited; restarting")
+            camera.mpv_process = None
+            self.start_mpv_tile(camera)
+        return True
+
+    def stop_mpv_tiles(self) -> None:
+        for camera in self.cameras:
+            if camera.mpv_monitor_source is not None:
+                GLib.source_remove(camera.mpv_monitor_source)
+                camera.mpv_monitor_source = None
+            if camera.mpv_process is not None and camera.mpv_process.poll() is None:
+                camera.mpv_process.terminate()
+                try:
+                    camera.mpv_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    camera.mpv_process.kill()
+            camera.mpv_process = None
 
     def connect_camera(self, camera: Camera) -> bool:
         if camera.camera_bin is not None:
@@ -406,6 +477,7 @@ class Viewport:
         self.pipeline.set_state(Gst.State.PLAYING)
         log("started")
         self.loop.run()
+        self.stop_mpv_tiles()
         self.pipeline.set_state(Gst.State.NULL)
         log("stopped")
         return 0
