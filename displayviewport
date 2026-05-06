@@ -66,6 +66,7 @@ printf 'setting\0viewport_latency_ms\0%s\0' "${viewport_latency_ms:-150}"
 printf 'setting\0viewport_retry_seconds\0%s\0' "${viewport_retry_seconds:-5}"
 printf 'setting\0viewport_sink\0%s\0' "${viewport_sink:-auto}"
 printf 'setting\0viewport_rtsp_protocol\0%s\0' "${viewport_rtsp_protocol:-tcp}"
+printf 'setting\0viewport_tls_validation\0%s\0' "${viewport_tls_validation:-false}"
 for i in "${!camera_names[@]}"; do
   printf 'camera\0%s\0%s\0%s\0' "${camera_names[$i]}" "${camera_feeds[$i]}" "${window_positions[$i]}"
 done
@@ -154,6 +155,7 @@ class Viewport:
         self.latency = max(0, int(settings.get("viewport_latency_ms", "150")))
         self.retry_seconds = max(1, int(settings.get("viewport_retry_seconds", "5")))
         self.rtsp_protocol = settings.get("viewport_rtsp_protocol", "tcp")
+        self.tls_validation = settings.get("viewport_tls_validation", "false").lower() == "true"
         self.pipeline = Gst.Pipeline.new("displayviewport")
         self.loop = GLib.MainLoop()
 
@@ -272,6 +274,9 @@ class Viewport:
             source.set_property("protocols", 4)
         if source.find_property("timeout"):
             source.set_property("timeout", 10_000_000)
+        if camera.uri.startswith("rtsps://") and source.find_property("tls-validation-flags") and not self.tls_validation:
+            source.set_property("tls-validation-flags", 0)
+            log(f"{camera.name} TLS certificate validation disabled for RTSPS source")
         log(f"{camera.name} source ready via {source.get_factory().get_name() if source.get_factory() else source.name}")
 
     def on_decode_pad_added(self, _decode: Gst.Element, pad: Gst.Pad, camera: Camera) -> None:
@@ -329,7 +334,9 @@ class Viewport:
                     log(debug)
                 self.loop.quit()
                 return
-            log(f"{camera.name} error: {error.message}")
+            log(f"{camera.name} error from {message.src.name}: {error.message}")
+            if debug:
+                log(f"{camera.name} debug: {debug}")
             self.drop_camera(camera)
             return
         if message.type == Gst.MessageType.EOS:
@@ -382,9 +389,9 @@ class Viewport:
 
 
 def main() -> int:
-    Gst.init(None)
     loaded = load_config()
     relaunch_as_display_user(loaded["settings"].get("display_user", "pi"))
+    Gst.init(None)
     cameras = loaded["cameras"]
     if len(cameras) < 4:
         log(f"only {len(cameras)} camera(s) configured; viewport works best with four")

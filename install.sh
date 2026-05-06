@@ -275,6 +275,9 @@ if [ -r /etc/displaycameras/displaycameras.conf ]; then
 		echo "viewport_retry_seconds=5" >> /etc/displaycameras/displaycameras.conf
 		echo "viewport_rtsp_protocol=tcp" >> /etc/displaycameras/displaycameras.conf
 	fi
+	if [ "$viewport" = "true" ] && ! grep -q '^viewport_tls_validation=' /etc/displaycameras/displaycameras.conf; then
+		echo "viewport_tls_validation=false" >> /etc/displaycameras/displaycameras.conf
+	fi
 fi
 if [ "$four_camera_layout" = "true" ]; then
 	write_four_camera_layout
