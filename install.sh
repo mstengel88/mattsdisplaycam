@@ -17,6 +17,7 @@ fi
 
 remote_access=false
 four_camera_layout=false
+viewport=false
 display_user="${SUDO_USER:-pi}"
 if [ "$display_user" = "root" ]; then
 	display_user=pi
@@ -28,6 +29,9 @@ do
 	fi
 	if [ "$arg" = "--four-camera-layout" ]; then
 		four_camera_layout=true
+	fi
+	if [ "$arg" = "--viewport" ]; then
+		viewport=true
 	fi
 done
 
@@ -128,6 +132,10 @@ else
 	player_backend="omxplayer"
 fi
 
+if [ "$viewport" = "true" ]; then
+	packages="$packages python3-gi python3-gst-1.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav"
+fi
+
 if [ "$remote_access" = "true" ]; then
 	packages="$packages x11vnc"
 fi
@@ -160,6 +168,22 @@ fi
 if [ -r $DIR/displaycameras-boot.timer ]; then
 	echo "Copying the boot timer and setting permissions."
 	cp -f $DIR/displaycameras-boot.timer /etc/systemd/system/ && chown root:root /etc/systemd/system/displaycameras-boot.timer && chmod 0644 /etc/systemd/system/displaycameras-boot.timer
+fi
+if [ "$viewport" = "true" ]; then
+	if [ -r $DIR/displayviewport ]; then
+		echo "Copying the viewport script and setting permissions."
+		cp -f $DIR/displayviewport /usr/bin/ && chown root:root /usr/bin/displayviewport && chmod 0755 /usr/bin/displayviewport
+	else
+		echo "The displayviewport file is missing or unreadable."
+		exit 2
+	fi
+	if [ -r $DIR/displayviewport.service ]; then
+		echo "Copying the viewport systemd service and setting permissions."
+		cp -f $DIR/displayviewport.service /etc/systemd/system/ && chown root:root /etc/systemd/system/displayviewport.service && chmod 0644 /etc/systemd/system/displayviewport.service
+	else
+		echo "The displayviewport.service file is missing or unreadable."
+		exit 2
+	fi
 fi
 # Config files, cron job, gpu memory split, and disable overscan support only if not upgrading
 if [ "$1" != "upgrade" ]; then
@@ -245,6 +269,12 @@ if [ -r /etc/displaycameras/displaycameras.conf ]; then
 			echo "mpv_grid=true" >> /etc/displaycameras/displaycameras.conf
 		fi
 	fi
+	if [ "$viewport" = "true" ] && ! grep -q '^viewport_fps=' /etc/displaycameras/displaycameras.conf; then
+		echo "viewport_fps=8" >> /etc/displaycameras/displaycameras.conf
+		echo "viewport_latency_ms=150" >> /etc/displaycameras/displaycameras.conf
+		echo "viewport_retry_seconds=5" >> /etc/displaycameras/displaycameras.conf
+		echo "viewport_rtsp_protocol=tcp" >> /etc/displaycameras/displaycameras.conf
+	fi
 fi
 if [ "$four_camera_layout" = "true" ]; then
 	write_four_camera_layout
@@ -285,8 +315,20 @@ fi
 
 # Update systemd and enable the displaycameras service.
 systemctl daemon-reload
-systemctl reenable displaycameras
-systemctl enable displaycameras-boot.timer
+if [ "$viewport" = "true" ]; then
+	systemctl stop displaycameras >/dev/null 2>&1 || true
+	systemctl disable displaycameras >/dev/null 2>&1 || true
+	systemctl disable displaycameras-boot.timer >/dev/null 2>&1 || true
+	systemctl enable displayviewport
+else
+	systemctl reenable displaycameras
+	systemctl enable displaycameras-boot.timer
+fi
 
 echo "Installation Successful!"
+if [ "$viewport" = "true" ]; then
+	echo "Viewport mode is enabled. Start it now with: sudo systemctl restart displayviewport"
+else
+	echo "Start it now with: sudo systemctl restart displaycameras"
+fi
 exit 0

@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+"""
+Fullscreen 2x2 camera viewport for Raspberry Pi OS Trixie.
+
+This uses GStreamer instead of spawning one mpv per camera. Each camera feeds an
+input-selector with a live black fallback, so a failed stream can reconnect
+without blanking or restarting the whole display.
+"""
+
+import os
+import pwd
+import signal
+import subprocess
+import sys
+from dataclasses import dataclass
+
+try:
+    import gi
+
+    gi.require_version("Gst", "1.0")
+    from gi.repository import GLib, Gst
+except Exception as exc:  # pragma: no cover - only hit on uninstalled systems
+    print(f"displayviewport requires python3-gi and GStreamer bindings: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+
+CONFIG_FILE = "/etc/displaycameras/displaycameras.conf"
+LAYOUT_FILE = "/etc/displaycameras/layout.conf.default"
+LOG_PREFIX = "displayviewport:"
+
+
+@dataclass
+class Camera:
+    index: int
+    name: str
+    uri: str
+    x: int
+    y: int
+    width: int
+    height: int
+    selector: Gst.Element | None = None
+    placeholder_pad: Gst.Pad | None = None
+    camera_pad: Gst.Pad | None = None
+    camera_bin: Gst.Bin | None = None
+    retry_source: int | None = None
+
+
+def log(message: str) -> None:
+    print(f"{LOG_PREFIX} {message}", flush=True)
+
+
+def load_config() -> dict:
+    if not os.path.exists(CONFIG_FILE):
+        raise RuntimeError(f"{CONFIG_FILE} does not exist")
+    if not os.path.exists(LAYOUT_FILE):
+        raise RuntimeError(f"{LAYOUT_FILE} does not exist")
+
+    script = r'''
+set -e
+. /etc/displaycameras/displaycameras.conf
+. /etc/displaycameras/layout.conf.default
+printf 'setting\0display_user\0%s\0' "${display_user:-pi}"
+printf 'setting\0viewport_fps\0%s\0' "${viewport_fps:-8}"
+printf 'setting\0viewport_latency_ms\0%s\0' "${viewport_latency_ms:-150}"
+printf 'setting\0viewport_retry_seconds\0%s\0' "${viewport_retry_seconds:-5}"
+printf 'setting\0viewport_sink\0%s\0' "${viewport_sink:-auto}"
+printf 'setting\0viewport_rtsp_protocol\0%s\0' "${viewport_rtsp_protocol:-tcp}"
+for i in "${!camera_names[@]}"; do
+  printf 'camera\0%s\0%s\0%s\0' "${camera_names[$i]}" "${camera_feeds[$i]}" "${window_positions[$i]}"
+done
+'''
+    result = subprocess.run(
+        ["bash", "-c", script],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    fields = result.stdout.split(b"\0")
+    if fields and fields[-1] == b"":
+        fields = fields[:-1]
+
+    settings: dict[str, str] = {}
+    cameras: list[Camera] = []
+    i = 0
+    while i < len(fields):
+        record_type = fields[i].decode()
+        if record_type == "setting":
+            key = fields[i + 1].decode()
+            value = fields[i + 2].decode()
+            settings[key] = value
+            i += 3
+            continue
+        if record_type == "camera":
+            name = fields[i + 1].decode()
+            uri = fields[i + 2].decode()
+            position = fields[i + 3].decode()
+            x1, y1, x2, y2 = [int(part) for part in position.split()]
+            cameras.append(Camera(len(cameras), name, uri, x1, y1, x2 - x1 + 1, y2 - y1 + 1))
+            i += 4
+            continue
+        raise RuntimeError(f"Unknown config record: {record_type}")
+
+    if not cameras:
+        raise RuntimeError("No cameras are configured")
+    return {"settings": settings, "cameras": cameras}
+
+
+def relaunch_as_display_user(display_user: str) -> None:
+    if os.geteuid() != 0 or os.environ.get("DISPLAYVIEWPORT_AS_DISPLAY_USER") == "1":
+        return
+
+    try:
+        pw = pwd.getpwnam(display_user)
+    except KeyError as exc:
+        raise RuntimeError(f"display_user {display_user!r} does not exist") from exc
+
+    env = os.environ.copy()
+    env["DISPLAYVIEWPORT_AS_DISPLAY_USER"] = "1"
+    env.setdefault("DISPLAY", ":0")
+    env["XDG_RUNTIME_DIR"] = f"/run/user/{pw.pw_uid}"
+    env.setdefault("XAUTHORITY", os.path.join(pw.pw_dir, ".Xauthority"))
+    if "WAYLAND_DISPLAY" not in env:
+        for candidate in ("wayland-0", "wayland-1"):
+            if os.path.exists(os.path.join(env["XDG_RUNTIME_DIR"], candidate)):
+                env["WAYLAND_DISPLAY"] = candidate
+                break
+
+    command = ["runuser", "-u", display_user, "--", "env"]
+    command.extend(f"{key}={value}" for key, value in env.items())
+    command.extend([sys.executable, os.path.abspath(sys.argv[0]), *sys.argv[1:]])
+    os.execvp(command[0], command)
+
+
+def make_element(factory: str, name: str | None = None) -> Gst.Element:
+    element = Gst.ElementFactory.make(factory, name)
+    if element is None:
+        raise RuntimeError(f"Missing GStreamer element: {factory}")
+    return element
+
+
+def link_many(*elements: Gst.Element) -> bool:
+    for left, right in zip(elements, elements[1:]):
+        if not left.link(right):
+            return False
+    return True
+
+
+class Viewport:
+    def __init__(self, cameras: list[Camera], settings: dict[str, str]):
+        self.cameras = cameras[:4]
+        self.settings = settings
+        self.fps = max(1, int(settings.get("viewport_fps", "8")))
+        self.latency = max(0, int(settings.get("viewport_latency_ms", "150")))
+        self.retry_seconds = max(1, int(settings.get("viewport_retry_seconds", "5")))
+        self.rtsp_protocol = settings.get("viewport_rtsp_protocol", "tcp")
+        self.pipeline = Gst.Pipeline.new("displayviewport")
+        self.loop = GLib.MainLoop()
+
+    def build(self) -> None:
+        mix = make_element("compositor", "viewport-compositor")
+        mix.set_property("background", "black")
+        convert = make_element("videoconvert", "viewport-convert")
+        queue = make_element("queue", "viewport-output-queue")
+        queue.set_property("leaky", 2)
+        queue.set_property("max-size-buffers", 1)
+        sink = self.make_sink()
+
+        for element in (mix, convert, queue, sink):
+            self.pipeline.add(element)
+        if not link_many(mix, convert, queue, sink):
+            raise RuntimeError("Unable to link viewport output pipeline")
+
+        for camera in self.cameras:
+            self.add_tile(mix, camera)
+            self.connect_camera(camera)
+
+        bus = self.pipeline.get_bus()
+        bus.add_signal_watch()
+        bus.connect("message", self.on_bus_message)
+
+    def make_sink(self) -> Gst.Element:
+        requested = self.settings.get("viewport_sink", "auto")
+        factories = []
+        if requested != "auto":
+            factories.append(requested)
+        elif os.environ.get("WAYLAND_DISPLAY"):
+            factories.extend(["waylandsink", "glimagesink", "autovideosink"])
+        else:
+            factories.extend(["glimagesink", "xvimagesink", "ximagesink", "autovideosink"])
+
+        for factory in factories:
+            sink = Gst.ElementFactory.make(factory, "viewport-sink")
+            if sink is None:
+                continue
+            for prop, value in (("fullscreen", True), ("force-aspect-ratio", False), ("sync", False)):
+                if sink.find_property(prop):
+                    sink.set_property(prop, value)
+            return sink
+        raise RuntimeError("No usable GStreamer video sink was found")
+
+    def add_tile(self, mix: Gst.Element, camera: Camera) -> None:
+        selector = make_element("input-selector", f"selector-{camera.index}")
+        queue = make_element("queue", f"selector-queue-{camera.index}")
+        queue.set_property("leaky", 2)
+        queue.set_property("max-size-buffers", 1)
+        self.pipeline.add(selector)
+        self.pipeline.add(queue)
+        if not selector.link(queue):
+            raise RuntimeError(f"Unable to link selector for {camera.name}")
+
+        mix_pad = mix.get_request_pad("sink_%u")
+        if mix_pad is None:
+            raise RuntimeError(f"Unable to request compositor pad for {camera.name}")
+        mix_pad.set_property("xpos", camera.x)
+        mix_pad.set_property("ypos", camera.y)
+        mix_pad.set_property("width", camera.width)
+        mix_pad.set_property("height", camera.height)
+        queue.get_static_pad("src").link(mix_pad)
+
+        placeholder = Gst.Bin.new(f"placeholder-{camera.index}")
+        black = make_element("videotestsrc", f"black-{camera.index}")
+        black.set_property("is-live", True)
+        black.set_property("pattern", "black")
+        caps = make_element("capsfilter", f"placeholder-caps-{camera.index}")
+        caps.set_property("caps", self.tile_caps(camera))
+        pqueue = make_element("queue", f"placeholder-queue-{camera.index}")
+        pqueue.set_property("leaky", 2)
+        pqueue.set_property("max-size-buffers", 1)
+        for element in (black, caps, pqueue):
+            placeholder.add(element)
+        if not link_many(black, caps, pqueue):
+            raise RuntimeError(f"Unable to link placeholder for {camera.name}")
+        placeholder.add_pad(Gst.GhostPad.new("src", pqueue.get_static_pad("src")))
+        self.pipeline.add(placeholder)
+
+        placeholder_pad = selector.get_request_pad("sink_%u")
+        placeholder.get_static_pad("src").link(placeholder_pad)
+        selector.set_property("active-pad", placeholder_pad)
+        placeholder.sync_state_with_parent()
+
+        camera.selector = selector
+        camera.placeholder_pad = placeholder_pad
+
+    def tile_caps(self, camera: Camera) -> Gst.Caps:
+        return Gst.Caps.from_string(
+            f"video/x-raw,width={camera.width},height={camera.height},framerate={self.fps}/1"
+        )
+
+    def connect_camera(self, camera: Camera) -> bool:
+        if camera.camera_bin is not None:
+            return False
+
+        log(f"connecting {camera.name}")
+        source_bin = Gst.Bin.new(f"camera-bin-{camera.index}")
+        decode = make_element("uridecodebin", f"decode-{camera.index}")
+        decode.set_property("uri", camera.uri)
+        decode.connect("source-setup", self.on_source_setup, camera)
+        decode.connect("pad-added", self.on_decode_pad_added, camera)
+        source_bin.add(decode)
+        self.pipeline.add(source_bin)
+        camera.camera_bin = source_bin
+        source_bin.sync_state_with_parent()
+        return False
+
+    def on_source_setup(self, _decode: Gst.Element, source: Gst.Element, camera: Camera) -> None:
+        if source.find_property("latency"):
+            source.set_property("latency", self.latency)
+        if source.find_property("drop-on-latency"):
+            source.set_property("drop-on-latency", True)
+        if source.find_property("protocols") and self.rtsp_protocol == "tcp":
+            source.set_property("protocols", 4)
+        if source.find_property("timeout"):
+            source.set_property("timeout", 10_000_000)
+        log(f"{camera.name} source ready via {source.get_factory().get_name() if source.get_factory() else source.name}")
+
+    def on_decode_pad_added(self, _decode: Gst.Element, pad: Gst.Pad, camera: Camera) -> None:
+        caps = pad.get_current_caps() or pad.query_caps(None)
+        if not caps.to_string().startswith("video/"):
+            return
+        if camera.camera_bin is None or camera.selector is None:
+            return
+
+        queue = make_element("queue", f"camera-queue-{camera.index}")
+        queue.set_property("leaky", 2)
+        queue.set_property("max-size-buffers", 1)
+        convert = make_element("videoconvert", f"camera-convert-{camera.index}")
+        scale = make_element("videoscale", f"camera-scale-{camera.index}")
+        rate = make_element("videorate", f"camera-rate-{camera.index}")
+        capsfilter = make_element("capsfilter", f"camera-caps-{camera.index}")
+        capsfilter.set_property("caps", self.tile_caps(camera))
+        out_queue = make_element("queue", f"camera-out-queue-{camera.index}")
+        out_queue.set_property("leaky", 2)
+        out_queue.set_property("max-size-buffers", 1)
+
+        for element in (queue, convert, scale, rate, capsfilter, out_queue):
+            camera.camera_bin.add(element)
+        if not link_many(queue, convert, scale, rate, capsfilter, out_queue):
+            log(f"{camera.name} failed to link decoded video chain")
+            return
+        if pad.link(queue.get_static_pad("sink")) != Gst.PadLinkReturn.OK:
+            log(f"{camera.name} failed to link decoded pad")
+            return
+
+        camera_pad = camera.selector.get_request_pad("sink_%u")
+        out_queue.get_static_pad("src").link(camera_pad)
+        camera.selector.set_property("active-pad", camera_pad)
+        camera.camera_pad = camera_pad
+        for element in (queue, convert, scale, rate, capsfilter, out_queue):
+            element.sync_state_with_parent()
+        log(f"{camera.name} live")
+
+    def on_bus_message(self, _bus: Gst.Bus, message: Gst.Message) -> None:
+        if message.type == Gst.MessageType.ERROR:
+            error, debug = message.parse_error()
+            camera = self.camera_for_source(message.src)
+            if camera is None:
+                log(f"pipeline error from {message.src.name}: {error.message}")
+                if debug:
+                    log(debug)
+                self.loop.quit()
+                return
+            log(f"{camera.name} error: {error.message}")
+            self.drop_camera(camera)
+            return
+        if message.type == Gst.MessageType.EOS:
+            camera = self.camera_for_source(message.src)
+            if camera is not None:
+                log(f"{camera.name} ended; reconnecting")
+                self.drop_camera(camera)
+
+    def camera_for_source(self, source: Gst.Object) -> Camera | None:
+        path = source.get_path_string()
+        for camera in self.cameras:
+            if f"camera-bin-{camera.index}" in path or f"decode-{camera.index}" in path:
+                return camera
+        return None
+
+    def drop_camera(self, camera: Camera) -> None:
+        if camera.selector is not None and camera.placeholder_pad is not None:
+            camera.selector.set_property("active-pad", camera.placeholder_pad)
+        if camera.camera_bin is not None:
+            camera.camera_bin.set_state(Gst.State.NULL)
+            self.pipeline.remove(camera.camera_bin)
+            camera.camera_bin = None
+        if camera.camera_pad is not None and camera.selector is not None:
+            peer = camera.camera_pad.get_peer()
+            if peer is not None:
+                peer.unlink(camera.camera_pad)
+            camera.selector.release_request_pad(camera.camera_pad)
+            camera.camera_pad = None
+        if camera.retry_source is None:
+            camera.retry_source = GLib.timeout_add_seconds(self.retry_seconds, self.retry_camera, camera)
+
+    def retry_camera(self, camera: Camera) -> bool:
+        camera.retry_source = None
+        return self.connect_camera(camera)
+
+    def run(self) -> int:
+        self.build()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, self.stop)
+        self.pipeline.set_state(Gst.State.PLAYING)
+        log("started")
+        self.loop.run()
+        self.pipeline.set_state(Gst.State.NULL)
+        log("stopped")
+        return 0
+
+    def stop(self) -> bool:
+        self.loop.quit()
+        return False
+
+
+def main() -> int:
+    Gst.init(None)
+    loaded = load_config()
+    relaunch_as_display_user(loaded["settings"].get("display_user", "pi"))
+    cameras = loaded["cameras"]
+    if len(cameras) < 4:
+        log(f"only {len(cameras)} camera(s) configured; viewport works best with four")
+    log("feeds: " + ", ".join(camera.name for camera in cameras[:4]))
+    viewport = Viewport(cameras, loaded["settings"])
+    return viewport.run()
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"{LOG_PREFIX} failed: {exc}", file=sys.stderr)
+        raise SystemExit(1)

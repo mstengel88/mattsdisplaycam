@@ -29,9 +29,9 @@ Download https://github.com/Anonymousdog/displaycameras/archive/master.tar.gz
 
 ## Installation
 1. `sudo ./install.sh`
-2. Accept the offer to view the README after successful installation and follow the instructions therein
+2. Follow the service command printed after successful installation.
 
-On Trixie, the installer installs `mpv`, `socat`, and `fbi`. On older releases where `omxplayer` is still available, the installer keeps the original `omxplayer` behavior.
+On Trixie, the installer installs `mpv`, `ffmpeg`, `socat`, and `fbi`. On older releases where `omxplayer` is still available, the installer keeps the original `omxplayer` behavior.
 
 For a reboot-safe four-camera screen, run:
 
@@ -42,6 +42,31 @@ That keeps your existing global config, backs up `/etc/displaycameras/layout.con
 `sudo systemctl daemon-reload && sudo systemctl restart displaycameras`
 
 The installer also enables `displaycameras-boot.timer`, which starts the camera display 90 seconds after boot as a fallback for desktops that create the graphical session slowly. The Pi still needs to boot to the desktop and automatically log in as `display_user` so `mpv` has a real display to use.
+
+### Optional Viewport Mode
+For four always-on streams on Trixie, install the GStreamer viewport:
+
+`sudo ./install.sh upgrade --four-camera-layout --viewport`
+
+Viewport mode installs and enables `displayviewport.service`, disables the older `displaycameras.service`, and renders the first four configured cameras into one fullscreen 2x2 compositor. Each tile has its own reconnect loop, so one stale or failed stream can reconnect without restarting the whole screen.
+
+Start or restart it with:
+
+`sudo systemctl restart displayviewport`
+
+Useful status and logs:
+
+`sudo systemctl status displayviewport -l --no-pager`
+
+`sudo journalctl -u displayviewport -n 120 --no-pager`
+
+Viewport tuning lives in `/etc/displaycameras/displaycameras.conf`:
+
+* `viewport_fps=8`
+* `viewport_latency_ms=150`
+* `viewport_retry_seconds=5`
+* `viewport_rtsp_protocol=tcp`
+* `viewport_sink=auto`
 
 ### Optional Remote Access
 Install the optional remote access service with:

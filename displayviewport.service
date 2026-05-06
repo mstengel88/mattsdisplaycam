@@ -1,0 +1,16 @@
+[Unit]
+Description=Fullscreen camera viewport
+After=network-online.target graphical.target display-manager.service
+Wants=network-online.target graphical.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+Environment=DISPLAY=:0
+ExecStart=/usr/bin/displayviewport
+
+[Install]
+WantedBy=graphical.target
