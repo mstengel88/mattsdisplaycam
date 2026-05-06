@@ -245,9 +245,7 @@ class Viewport:
         camera.placeholder_pad = placeholder_pad
 
     def tile_caps(self, camera: Camera) -> Gst.Caps:
-        return Gst.Caps.from_string(
-            f"video/x-raw,width={camera.width},height={camera.height},framerate={self.fps}/1"
-        )
+        return Gst.Caps.from_string(f"video/x-raw,width={camera.width},height={camera.height}")
 
     def connect_camera(self, camera: Camera) -> bool:
         if camera.camera_bin is not None:
@@ -257,6 +255,8 @@ class Viewport:
         source_bin = Gst.Bin.new(f"camera-bin-{camera.index}")
         decode = make_element("uridecodebin", f"decode-{camera.index}")
         decode.set_property("uri", camera.uri)
+        if decode.find_property("caps"):
+            decode.set_property("caps", Gst.Caps.from_string("video/x-raw"))
         decode.connect("source-setup", self.on_source_setup, camera)
         decode.connect("pad-added", self.on_decode_pad_added, camera)
         source_bin.add(decode)
@@ -292,6 +292,10 @@ class Viewport:
         convert = make_element("videoconvert", f"camera-convert-{camera.index}")
         scale = make_element("videoscale", f"camera-scale-{camera.index}")
         rate = make_element("videorate", f"camera-rate-{camera.index}")
+        if rate.find_property("max-rate"):
+            rate.set_property("max-rate", self.fps)
+        if rate.find_property("drop-only"):
+            rate.set_property("drop-only", True)
         capsfilter = make_element("capsfilter", f"camera-caps-{camera.index}")
         capsfilter.set_property("caps", self.tile_caps(camera))
         out_queue = make_element("queue", f"camera-out-queue-{camera.index}")
@@ -332,7 +336,7 @@ class Viewport:
                 log(f"pipeline error from {message.src.name}: {error.message}")
                 if debug:
                     log(debug)
-                self.loop.quit()
+                log("ignoring non-fatal pipeline error")
                 return
             log(f"{camera.name} error from {message.src.name}: {error.message}")
             if debug:
