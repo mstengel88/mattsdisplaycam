@@ -41,6 +41,7 @@ class Camera:
     selector: Gst.Element | None = None
     placeholder_pad: Gst.Pad | None = None
     camera_pad: Gst.Pad | None = None
+    camera_src_pad: Gst.GhostPad | None = None
     camera_bin: Gst.Bin | None = None
     retry_source: int | None = None
 
@@ -301,10 +302,19 @@ class Viewport:
             log(f"{camera.name} failed to link decoded pad")
             return
 
+        src_pad = out_queue.get_static_pad("src")
+        ghost_pad = Gst.GhostPad.new("src", src_pad)
+        if not camera.camera_bin.add_pad(ghost_pad):
+            log(f"{camera.name} failed to expose camera bin output")
+            return
+
         camera_pad = camera.selector.get_request_pad("sink_%u")
-        out_queue.get_static_pad("src").link(camera_pad)
+        if ghost_pad.link(camera_pad) != Gst.PadLinkReturn.OK:
+            log(f"{camera.name} failed to link camera output to selector")
+            return
         camera.selector.set_property("active-pad", camera_pad)
         camera.camera_pad = camera_pad
+        camera.camera_src_pad = ghost_pad
         for element in (queue, convert, scale, rate, capsfilter, out_queue):
             element.sync_state_with_parent()
         log(f"{camera.name} live")
@@ -343,11 +353,11 @@ class Viewport:
             self.pipeline.remove(camera.camera_bin)
             camera.camera_bin = None
         if camera.camera_pad is not None and camera.selector is not None:
-            peer = camera.camera_pad.get_peer()
-            if peer is not None:
-                peer.unlink(camera.camera_pad)
+            if camera.camera_src_pad is not None:
+                camera.camera_src_pad.unlink(camera.camera_pad)
             camera.selector.release_request_pad(camera.camera_pad)
             camera.camera_pad = None
+            camera.camera_src_pad = None
         if camera.retry_source is None:
             camera.retry_source = GLib.timeout_add_seconds(self.retry_seconds, self.retry_camera, camera)
 
