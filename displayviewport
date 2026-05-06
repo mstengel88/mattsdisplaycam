@@ -44,6 +44,8 @@ class Camera:
     camera_src_pad: Gst.GhostPad | None = None
     camera_bin: Gst.Bin | None = None
     retry_source: int | None = None
+    retry_delay: int = 0
+    unsupported_stream: bool = False
 
 
 def log(message: str) -> None:
@@ -349,6 +351,12 @@ class Viewport:
             log(f"{camera.name} error from {message.src.name}: {error.message}")
             if debug:
                 log(f"{camera.name} debug: {debug}")
+            if debug and ("NAL unit type 26 not supported yet" in debug or "NAL unit type 27 not supported yet" in debug):
+                camera.unsupported_stream = True
+                log(
+                    f"{camera.name} uses an RTSPS/SRTP H.264 packetization GStreamer cannot depayload; "
+                    "use a plain RTSP URL for this camera if UniFi Protect offers one."
+                )
             self.drop_camera(camera)
             return
         if message.type == Gst.MessageType.EOS:
@@ -378,10 +386,17 @@ class Viewport:
             camera.camera_pad = None
             camera.camera_src_pad = None
         if camera.retry_source is None:
-            camera.retry_source = GLib.timeout_add_seconds(self.retry_seconds, self.retry_camera, camera)
+            if camera.unsupported_stream:
+                camera.retry_delay = max(camera.retry_delay, 300)
+            else:
+                camera.retry_delay = self.retry_seconds if camera.retry_delay == 0 else min(camera.retry_delay * 2, 60)
+            log(f"{camera.name} will retry in {camera.retry_delay}s")
+            camera.retry_source = GLib.timeout_add_seconds(camera.retry_delay, self.retry_camera, camera)
 
     def retry_camera(self, camera: Camera) -> bool:
         camera.retry_source = None
+        if not camera.unsupported_stream:
+            camera.retry_delay = 0
         return self.connect_camera(camera)
 
     def run(self) -> int:
