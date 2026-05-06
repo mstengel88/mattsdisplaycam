@@ -253,19 +253,17 @@ class Viewport:
 
         log(f"connecting {camera.name}")
         source_bin = Gst.Bin.new(f"camera-bin-{camera.index}")
-        decode = make_element("uridecodebin", f"decode-{camera.index}")
-        decode.set_property("uri", camera.uri)
-        if decode.find_property("caps"):
-            decode.set_property("caps", Gst.Caps.from_string("video/x-raw"))
-        decode.connect("source-setup", self.on_source_setup, camera)
-        decode.connect("pad-added", self.on_decode_pad_added, camera)
-        source_bin.add(decode)
+        source = make_element("rtspsrc", f"source-{camera.index}")
+        source.set_property("location", camera.uri)
+        self.configure_rtsp_source(source, camera)
+        source.connect("pad-added", self.on_rtsp_pad_added, camera)
+        source_bin.add(source)
         self.pipeline.add(source_bin)
         camera.camera_bin = source_bin
         source_bin.sync_state_with_parent()
         return False
 
-    def on_source_setup(self, _decode: Gst.Element, source: Gst.Element, camera: Camera) -> None:
+    def configure_rtsp_source(self, source: Gst.Element, camera: Camera) -> None:
         if source.find_property("latency"):
             source.set_property("latency", self.latency)
         if source.find_property("drop-on-latency"):
@@ -279,16 +277,26 @@ class Viewport:
             log(f"{camera.name} TLS certificate validation disabled for RTSPS source")
         log(f"{camera.name} source ready via {source.get_factory().get_name() if source.get_factory() else source.name}")
 
-    def on_decode_pad_added(self, _decode: Gst.Element, pad: Gst.Pad, camera: Camera) -> None:
+    def on_rtsp_pad_added(self, _source: Gst.Element, pad: Gst.Pad, camera: Camera) -> None:
         caps = pad.get_current_caps() or pad.query_caps(None)
-        if not caps.to_string().startswith("video/"):
+        caps_text = caps.to_string()
+        if not caps_text.startswith("application/x-rtp") or "media=(string)video" not in caps_text:
             return
         if camera.camera_bin is None or camera.selector is None:
             return
 
-        queue = make_element("queue", f"camera-queue-{camera.index}")
-        queue.set_property("leaky", 2)
-        queue.set_property("max-size-buffers", 1)
+        if "encoding-name=(string)H265" in caps_text or "encoding-name=(string)HEVC" in caps_text:
+            depay = make_element("rtph265depay", f"camera-depay-{camera.index}")
+            parse = make_element("h265parse", f"camera-parse-{camera.index}")
+            decoder = make_element("avdec_h265", f"camera-decoder-{camera.index}")
+        else:
+            depay = make_element("rtph264depay", f"camera-depay-{camera.index}")
+            parse = make_element("h264parse", f"camera-parse-{camera.index}")
+            decoder = make_element("avdec_h264", f"camera-decoder-{camera.index}")
+
+        in_queue = make_element("queue", f"camera-in-queue-{camera.index}")
+        in_queue.set_property("leaky", 2)
+        in_queue.set_property("max-size-buffers", 1)
         convert = make_element("videoconvert", f"camera-convert-{camera.index}")
         scale = make_element("videoscale", f"camera-scale-{camera.index}")
         rate = make_element("videorate", f"camera-rate-{camera.index}")
@@ -302,13 +310,13 @@ class Viewport:
         out_queue.set_property("leaky", 2)
         out_queue.set_property("max-size-buffers", 1)
 
-        for element in (queue, convert, scale, rate, capsfilter, out_queue):
+        for element in (in_queue, depay, parse, decoder, convert, scale, rate, capsfilter, out_queue):
             camera.camera_bin.add(element)
-        if not link_many(queue, convert, scale, rate, capsfilter, out_queue):
+        if not link_many(in_queue, depay, parse, decoder, convert, scale, rate, capsfilter, out_queue):
             log(f"{camera.name} failed to link decoded video chain")
             return
-        if pad.link(queue.get_static_pad("sink")) != Gst.PadLinkReturn.OK:
-            log(f"{camera.name} failed to link decoded pad")
+        if pad.link(in_queue.get_static_pad("sink")) != Gst.PadLinkReturn.OK:
+            log(f"{camera.name} failed to link RTSP video pad")
             return
 
         src_pad = out_queue.get_static_pad("src")
@@ -324,7 +332,7 @@ class Viewport:
         camera.selector.set_property("active-pad", camera_pad)
         camera.camera_pad = camera_pad
         camera.camera_src_pad = ghost_pad
-        for element in (queue, convert, scale, rate, capsfilter, out_queue):
+        for element in (in_queue, depay, parse, decoder, convert, scale, rate, capsfilter, out_queue):
             element.sync_state_with_parent()
         log(f"{camera.name} live")
 
@@ -352,7 +360,7 @@ class Viewport:
     def camera_for_source(self, source: Gst.Object) -> Camera | None:
         path = source.get_path_string()
         for camera in self.cameras:
-            if f"camera-bin-{camera.index}" in path or f"decode-{camera.index}" in path:
+            if f"camera-bin-{camera.index}" in path or f"source-{camera.index}" in path:
                 return camera
         return None
 
